@@ -81,3 +81,18 @@ export function renderConsent({ uid, clientName, scope }) {
     </div>
   `);
 }
+
+export function renderExpiredSession() {
+  return page('Session expired', `
+    <h2>Session expired</h2>
+    <p class="hint">The interaction is no longer valid. Start a new OAuth login flow.</p>
+    <div class="actions">
+      <form method="get" action="/app">
+        <button type="submit">Open OAuth Console</button>
+      </form>
+      <form method="get" action="/">
+        <button class="secondary" type="submit">Go to home</button>
+      </form>
+    </div>
+  `);
+}
