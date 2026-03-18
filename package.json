@@ -1,0 +1,21 @@
+{
+  "name": "oauth2-2fa-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "argon2": "^0.41.1",
+    "better-sqlite3": "^11.7.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
+    "oidc-provider": "^8.5.1",
+    "qrcode": "^1.5.4",
+    "speakeasy": "^2.0.0"
+  }
+}
