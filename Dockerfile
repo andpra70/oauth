@@ -11,6 +11,7 @@ RUN npm install --omit=dev \
   && npm cache clean --force
 
 COPY src ./src
+COPY public ./public
 COPY .env.example ./.env.example
 
 RUN mkdir -p /app/data \

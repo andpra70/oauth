@@ -1,35 +1,35 @@
-import Database from 'better-sqlite3';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import argon2 from 'argon2';
 import speakeasy from 'speakeasy';
 
-const db = new Database('data/oauth/oauth.db');
+const dbPath = 'data/oauth/db.json';
 
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+function defaultState() {
+  return {
+    users: [],
+    oauth_clients: [],
+  };
+}
 
-export function ensureSchema() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      username TEXT NOT NULL UNIQUE,
-      email TEXT,
-      password_hash TEXT NOT NULL,
-      totp_secret TEXT NOT NULL,
-      totp_enabled INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL
-    );
+function loadState() {
+  if (!existsSync(dbPath)) {
+    return defaultState();
+  }
 
-    CREATE TABLE IF NOT EXISTS oauth_clients (
-      client_id TEXT PRIMARY KEY,
-      client_secret TEXT NOT NULL,
-      redirect_uris TEXT NOT NULL,
-      post_logout_redirect_uris TEXT NOT NULL,
-      grant_types TEXT NOT NULL,
-      response_types TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      token_endpoint_auth_method TEXT NOT NULL
-    );
-  `);
+  const raw = readFileSync(dbPath, 'utf8').trim();
+  if (!raw) {
+    return defaultState();
+  }
+
+  const parsed = JSON.parse(raw);
+  return {
+    users: Array.isArray(parsed.users) ? parsed.users : [],
+    oauth_clients: Array.isArray(parsed.oauth_clients) ? parsed.oauth_clients : [],
+  };
+}
+
+function saveState(state) {
+  writeFileSync(dbPath, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 function nowIso() {
@@ -38,6 +38,16 @@ function nowIso() {
 
 function newId(prefix) {
   return `${prefix}_${Math.random().toString(36).slice(2, 12)}${Date.now().toString(36)}`;
+}
+
+export function ensureSchema() {
+  if (!existsSync(dbPath)) {
+    saveState(defaultState());
+    return;
+  }
+
+  const state = loadState();
+  saveState(state);
 }
 
 export async function seedAdminFromEnv() {
@@ -49,7 +59,8 @@ export async function seedAdminFromEnv() {
     throw new Error('ADMIN_PASSWORD must be set and at least 12 chars long');
   }
 
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+  const state = loadState();
+  const existing = state.users.find((user) => user.username === username);
   if (existing) return;
 
   const secret = speakeasy.generateSecret({ name: `OAuth2 (${username})` });
@@ -60,10 +71,16 @@ export async function seedAdminFromEnv() {
     parallelism: 1,
   });
 
-  db.prepare(
-    `INSERT INTO users (id, username, email, password_hash, totp_secret, totp_enabled, created_at)
-     VALUES (?, ?, ?, ?, ?, 1, ?)`
-  ).run(newId('usr'), username, email, passwordHash, secret.base32, nowIso());
+  state.users.push({
+    id: newId('usr'),
+    username,
+    email,
+    password_hash: passwordHash,
+    totp_secret: secret.base32,
+    totp_enabled: 1,
+    created_at: nowIso(),
+  });
+  saveState(state);
 
   console.log('Admin user created. Configure your Authenticator app with this secret:');
   console.log(secret.base32);
@@ -76,48 +93,54 @@ export function seedClientFromEnv() {
   const clientId = process.env.DEFAULT_CLIENT_ID || 'fileserver-web';
   const authMethod = process.env.DEFAULT_CLIENT_AUTH_METHOD || 'none';
   const clientSecret = process.env.DEFAULT_CLIENT_SECRET || '';
-  const redirectUri = process.env.DEFAULT_CLIENT_REDIRECT_URI || 'http://localhost:8080/callback';
-  const postLogoutRedirectUri = process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URI || 'http://localhost:8080';
+  const redirectUris = (process.env.DEFAULT_CLIENT_REDIRECT_URIS || process.env.DEFAULT_CLIENT_REDIRECT_URI || 'http://localhost:9000/app/callback,http://localhost:9000/example/callback')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const postLogoutRedirectUris = (process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS || process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URI || 'http://localhost:9000/app,http://localhost:9000/example')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
 
   if (authMethod !== 'none' && (!clientSecret || clientSecret.length < 24)) {
     throw new Error('DEFAULT_CLIENT_SECRET must be set and at least 24 chars long');
   }
 
-  db.prepare(
-    `INSERT INTO oauth_clients
-      (client_id, client_secret, redirect_uris, post_logout_redirect_uris, grant_types, response_types, scope, token_endpoint_auth_method)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    + ` ON CONFLICT(client_id) DO UPDATE SET`
-    + ` client_secret = excluded.client_secret,`
-    + ` redirect_uris = excluded.redirect_uris,`
-    + ` post_logout_redirect_uris = excluded.post_logout_redirect_uris,`
-    + ` grant_types = excluded.grant_types,`
-    + ` response_types = excluded.response_types,`
-    + ` scope = excluded.scope,`
-    + ` token_endpoint_auth_method = excluded.token_endpoint_auth_method`
-  ).run(
-    clientId,
-    authMethod === 'none' ? '' : clientSecret,
-    JSON.stringify([redirectUri]),
-    JSON.stringify([postLogoutRedirectUri]),
-    JSON.stringify(['authorization_code', 'refresh_token']),
-    JSON.stringify(['code']),
-    'openid profile email offline_access',
-    authMethod
-  );
+  const state = loadState();
+  const client = {
+    client_id: clientId,
+    client_secret: authMethod === 'none' ? '' : clientSecret,
+    redirect_uris: redirectUris,
+    post_logout_redirect_uris: postLogoutRedirectUris,
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    scope: 'openid profile email offline_access',
+    token_endpoint_auth_method: authMethod,
+  };
+
+  const existingIndex = state.oauth_clients.findIndex((item) => item.client_id === clientId);
+  if (existingIndex >= 0) {
+    state.oauth_clients[existingIndex] = client;
+  } else {
+    state.oauth_clients.push(client);
+  }
+
+  saveState(state);
 }
 
 export function findUserByUsername(username) {
-  return db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  const state = loadState();
+  return state.users.find((user) => user.username === username);
 }
 
 export function findUserById(id) {
-  return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  const state = loadState();
+  return state.users.find((user) => user.id === id);
 }
 
 export function getClients() {
-  const rows = db.prepare('SELECT * FROM oauth_clients').all();
-  return rows.map((row) => {
+  const state = loadState();
+  return state.oauth_clients.map((row) => {
     const tokenEndpointAuthMethod = row.token_endpoint_auth_method || 'none';
 
     return {
@@ -125,10 +148,10 @@ export function getClients() {
       ...(tokenEndpointAuthMethod !== 'none' && row.client_secret
         ? { client_secret: row.client_secret }
         : {}),
-      redirect_uris: JSON.parse(row.redirect_uris),
-      post_logout_redirect_uris: JSON.parse(row.post_logout_redirect_uris),
-      grant_types: JSON.parse(row.grant_types),
-      response_types: JSON.parse(row.response_types),
+      redirect_uris: Array.isArray(row.redirect_uris) ? row.redirect_uris : [],
+      post_logout_redirect_uris: Array.isArray(row.post_logout_redirect_uris) ? row.post_logout_redirect_uris : [],
+      grant_types: Array.isArray(row.grant_types) ? row.grant_types : [],
+      response_types: Array.isArray(row.response_types) ? row.response_types : [],
       scope: row.scope,
       token_endpoint_auth_method: tokenEndpointAuthMethod,
     };

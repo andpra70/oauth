@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import express from 'express';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
@@ -10,14 +12,17 @@ import QRCode from 'qrcode';
 import { Provider } from 'oidc-provider';
 import { ensureSchema, findUserById, findUserByUsername, getClients, seedAdminFromEnv, seedClientFromEnv } from './db.js';
 import { findAccount } from './account.js';
-import { renderConsent, renderLogin, renderTotp } from './html.js';
+import { renderConsent, renderExpiredSession, renderLogin, renderTotp } from './html.js';
+import { ensureOidcStore, JsonAdapter } from './oidc-adapter.js';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const publicDir = join(__dirname, '..', 'public');
 const app = express();
 const port = Number(process.env.PORT || 9000);
 const issuer = process.env.ISSUER || `http://localhost:${port}`;
 const cookieKeys = (process.env.COOKIE_KEYS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const trustProxy = String(process.env.TRUST_PROXY || 'false').toLowerCase() === 'true';
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:8080,http://localhost')
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:9000,http://localhost:8080,http://localhost')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -36,6 +41,7 @@ if (cookieKeys.length < 3) {
 
 mkdirSync('data/oauth', { recursive: true });
 ensureSchema();
+ensureOidcStore();
 await seedAdminFromEnv();
 seedClientFromEnv();
 
@@ -56,7 +62,27 @@ function getQrSetupUrl() {
   const setupToken = process.env.SETUP_TOKEN || '';
   const adminUser = process.env.ADMIN_USERNAME || 'admin';
   if (!setupToken) return '';
-  return `/oauth/setup/2fa-qr/${encodeURIComponent(adminUser)}?token=${encodeURIComponent(setupToken)}`;
+  return `/setup/2fa-qr/${encodeURIComponent(adminUser)}?token=${encodeURIComponent(setupToken)}`;
+}
+
+async function getQrSetupPayload(username) {
+  const user = findUserByUsername(username);
+  if (!user?.totp_secret) {
+    return null;
+  }
+
+  const otpauthUrl = speakeasy.otpauthURL({
+    secret: user.totp_secret,
+    label: `OAuth2 (${user.username})`,
+    issuer: 'Local OAuth2 Server',
+    encoding: 'base32',
+  });
+
+  return {
+    username: user.username,
+    otpauthUrl,
+    dataUrl: await QRCode.toDataURL(otpauthUrl),
+  };
 }
 
 function createTotpChallenge(uid, accountId) {
@@ -76,6 +102,15 @@ function consumeTotpChallenge(challenge, uid) {
   if (data.uid !== uid) return null;
   if (Date.now() > data.expiresAt) return null;
   return data;
+}
+
+function isMissingInteractionSession(error) {
+  return error?.error === 'invalid_request' && error?.error_description === 'interaction session not found';
+}
+
+function respondExpiredSession(res) {
+  res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(renderExpiredSession());
 }
 
 setInterval(() => {
@@ -151,6 +186,7 @@ const provider = new Provider(issuer, {
   formats: {
     AccessToken: 'jwt',
   },
+  adapter: JsonAdapter,
 });
 
 provider.proxy = trustProxy;
@@ -173,6 +209,16 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, issuer });
 });
 
+app.use('/app/assets', express.static(join(publicDir, 'assets')));
+
+app.get(['/', '/app', '/app/callback'], (_req, res) => {
+  res.sendFile(join(publicDir, 'index.html'));
+});
+
+app.get(['/example', '/example/callback'], (_req, res) => {
+  res.sendFile(join(publicDir, 'example.html'));
+});
+
 app.get('/setup/2fa-qr/:username', async (req, res) => {
   const setupToken = process.env.SETUP_TOKEN || '';
   const queryToken = String(req.query.token || '');
@@ -187,21 +233,35 @@ app.get('/setup/2fa-qr/:username', async (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
 
-  const user = findUserByUsername(provided);
-  if (!user?.totp_secret) {
+  const payload = await getQrSetupPayload(provided);
+  if (!payload) {
     return res.status(404).json({ error: 'User not found' });
   }
 
-  const otpauthUrl = speakeasy.otpauthURL({
-    secret: user.totp_secret,
-    label: `OAuth2 (${user.username})`,
-    issuer: 'Local OAuth2 Server',
-    encoding: 'base32',
-  });
-
-  const dataUrl = await QRCode.toDataURL(otpauthUrl);
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.end(`<img alt="qr" src="${dataUrl}" /><p>${otpauthUrl}</p>`);
+  res.end(`<img alt="qr" src="${payload.dataUrl}" /><p>${payload.otpauthUrl}</p>`);
+});
+
+app.get('/setup/2fa-qr/:username.json', async (req, res) => {
+  const setupToken = process.env.SETUP_TOKEN || '';
+  const queryToken = String(req.query.token || '');
+  const headerToken = req.get('x-setup-token') || '';
+  if (!setupToken || (headerToken !== setupToken && queryToken !== setupToken)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const adminUser = process.env.ADMIN_USERNAME || 'admin';
+  const provided = req.params.username;
+  if (provided !== adminUser) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const payload = await getQrSetupPayload(provided);
+  if (!payload) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  res.json(payload);
 });
 
 app.get('/interaction/:uid', async (req, res, next) => {
@@ -265,6 +325,10 @@ app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
 
     await provider.interactionFinished(req, res, result, { mergeWithLastSubmission: false });
   } catch (err) {
+    if (isMissingInteractionSession(err)) {
+      respondExpiredSession(res);
+      return;
+    }
     next(err);
   }
 });
@@ -312,6 +376,10 @@ app.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, nex
 
     await provider.interactionFinished(req, res, result, { mergeWithLastSubmission: false });
   } catch (err) {
+    if (isMissingInteractionSession(err)) {
+      respondExpiredSession(res);
+      return;
+    }
     next(err);
   }
 });
@@ -345,6 +413,10 @@ app.post('/interaction/:uid/confirm', formParser, async (req, res, next) => {
 
     await provider.interactionFinished(req, res, result, { mergeWithLastSubmission: true });
   } catch (err) {
+    if (isMissingInteractionSession(err)) {
+      respondExpiredSession(res);
+      return;
+    }
     next(err);
   }
 });
@@ -358,6 +430,10 @@ app.post('/interaction/:uid/abort', formParser, async (req, res, next) => {
 
     await provider.interactionFinished(req, res, result, { mergeWithLastSubmission: false });
   } catch (err) {
+    if (isMissingInteractionSession(err)) {
+      respondExpiredSession(res);
+      return;
+    }
     next(err);
   }
 });
