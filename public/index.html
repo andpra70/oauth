@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OAuth Server Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --panel: rgba(255, 252, 246, 0.88);
+      --panel-strong: #fffaf1;
+      --ink: #1b160f;
+      --muted: #6a6256;
+      --line: rgba(63, 45, 23, 0.12);
+      --accent: #b34b27;
+      --accent-2: #1f6b5f;
+      --shadow: 0 24px 70px rgba(54, 35, 13, 0.15);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(179, 75, 39, 0.15), transparent 28%),
+        radial-gradient(circle at top right, rgba(31, 107, 95, 0.14), transparent 24%),
+        linear-gradient(135deg, #f8f2e8 0%, #efe6d7 48%, #f6f1ea 100%);
+    }
+
+    main {
+      width: min(1120px, calc(100% - 32px));
+      margin: 24px auto;
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero,
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+
+    .hero {
+      padding: 28px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-size: clamp(2rem, 4vw, 3.6rem);
+      line-height: 0.95;
+      letter-spacing: -0.05em;
+      max-width: 12ch;
+    }
+
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 64ch;
+      line-height: 1.55;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 18px;
+    }
+
+    .panel {
+      padding: 22px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .panel h2,
+    .panel h3 {
+      margin: 0;
+      font-size: 1.05rem;
+    }
+
+    .fields {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .field.full {
+      grid-column: 1 / -1;
+    }
+
+    label {
+      font-size: 0.84rem;
+      color: var(--muted);
+    }
+
+    input,
+    textarea {
+      width: 100%;
+      border: 1px solid rgba(63, 45, 23, 0.16);
+      border-radius: 14px;
+      padding: 12px 14px;
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--ink);
+      font: inherit;
+    }
+
+    textarea {
+      min-height: 128px;
+      resize: vertical;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 160ms ease, opacity 160ms ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    button:disabled { opacity: 0.55; cursor: wait; transform: none; }
+    .primary { background: var(--accent); color: #fff9f3; }
+    .secondary { background: #ece4d6; color: var(--ink); }
+    .ghost { background: transparent; border: 1px solid rgba(63, 45, 23, 0.18); color: var(--ink); }
+
+    .status {
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(31, 107, 95, 0.08);
+      color: #18473f;
+      min-height: 48px;
+      line-height: 1.45;
+    }
+
+    .status.error {
+      background: rgba(179, 75, 39, 0.1);
+      color: #7e3016;
+    }
+
+    .tokens,
+    .meta {
+      display: grid;
+      gap: 12px;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: rgba(31, 107, 95, 0.09);
+      color: var(--accent-2);
+      font-size: 0.82rem;
+      font-weight: 700;
+    }
+
+    .qr {
+      display: grid;
+      justify-items: start;
+      gap: 10px;
+    }
+
+    .qr img {
+      width: min(240px, 100%);
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: white;
+      padding: 10px;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(27, 22, 15, 0.94);
+      color: #fdf4ea;
+      padding: 14px;
+      border-radius: 16px;
+      overflow: auto;
+    }
+
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: 1fr; }
+      .fields { grid-template-columns: 1fr; }
+      main { width: min(100% - 20px, 1120px); }
+      .hero, .panel { border-radius: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="badge-row">
+        <span class="badge">Authorization Code + PKCE</span>
+        <span class="badge">TOTP</span>
+        <span class="badge">Same container UI</span>
+      </div>
+      <h1>OAuth Sign-In Console</h1>
+      <p>
+        Questa pagina vive nello stesso container del provider OIDC. Avvia il flow di autenticazione,
+        gestisce il callback, scambia il code con i token e mostra il QR TOTP dell'utente admin.
+      </p>
+      <p class="hint">
+        Esempio minimale: <a href="/example">/example</a>
+      </p>
+    </section>
+
+    <section class="grid">
+      <section class="panel">
+        <h2>Avvio flow</h2>
+        <div class="fields">
+          <div class="field">
+            <label for="issuer">Issuer</label>
+            <input id="issuer" />
+          </div>
+          <div class="field">
+            <label for="clientId">Client ID</label>
+            <input id="clientId" />
+          </div>
+          <div class="field full">
+            <label for="redirectUri">Redirect URI</label>
+            <input id="redirectUri" />
+          </div>
+          <div class="field full">
+            <label for="scope">Scope</label>
+            <input id="scope" />
+          </div>
+          <div class="field">
+            <label for="setupToken">Setup token TOTP</label>
+            <input id="setupToken" placeholder="replace-with-bootstrap-token" />
+          </div>
+          <div class="field">
+            <label for="username">Admin username</label>
+            <input id="username" />
+          </div>
+        </div>
+        <div class="actions">
+          <button class="primary" id="startAuth">Accedi con OAuth</button>
+          <button class="secondary" id="loadQr">Mostra QR TOTP</button>
+          <button class="ghost" id="clearState">Pulisci sessione</button>
+        </div>
+        <div class="status" id="status">Pronto. Avvia il flow oppure carica il QR TOTP.</div>
+      </section>
+
+      <section class="panel">
+        <h2>QR e TOTP</h2>
+        <div class="qr">
+          <img id="qrImage" alt="QR TOTP" hidden />
+          <div class="hint" id="qrHint">
+            Il QR è protetto dal setup token. Dopo il bootstrap iniziale puoi usarlo con una app TOTP
+            e completare il login nelle schermate `/interaction/:uid`.
+          </div>
+          <pre id="otpauth">Nessun QR caricato.</pre>
+        </div>
+      </section>
+    </section>
+
+    <section class="grid">
+      <section class="panel">
+        <h3>Tokens</h3>
+        <div class="tokens">
+          <pre id="tokenOutput">Nessun token disponibile.</pre>
+        </div>
+      </section>
+      <section class="panel">
+        <h3>UserInfo</h3>
+        <div class="meta">
+          <pre id="meOutput">Nessun profilo caricato.</pre>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script type="module" src="/app/assets/app.js"></script>
+</body>
+</html>
