@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OAuth Example</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #f7f7f5;
+      color: #171717;
+    }
+    main {
+      max-width: 760px;
+      margin: 40px auto;
+      padding: 0 16px;
+    }
+    .card {
+      background: #fff;
+      border: 1px solid #e5e5e5;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.05);
+    }
+    h1, h2 { margin-top: 0; }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 12px 16px;
+      background: #111827;
+      color: white;
+      font: inherit;
+      cursor: pointer;
+    }
+    pre {
+      background: #111827;
+      color: #f9fafb;
+      padding: 14px;
+      border-radius: 12px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .muted { color: #525252; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h1>OAuth Example</h1>
+      <p class="muted">Example minimo servito dallo stesso server. Avvia Authorization Code + PKCE, completa login/TOTP e mostra token e userinfo.</p>
+      <p><button id="login">Login with OAuth</button></p>
+      <p class="muted"><a href="/app">Open full console</a></p>
+
+      <h2>Tokens</h2>
+      <pre id="tokens">No tokens yet.</pre>
+
+      <h2>UserInfo</h2>
+      <pre id="me">No profile yet.</pre>
+    </div>
+  </main>
+
+  <script>
+    const clientId = 'fileserver-web';
+    const issuer = window.location.origin;
+    const redirectUri = issuer + '/example/callback';
+    const scope = 'openid profile email offline_access';
+    const storageKey = 'oauth-example';
+
+    const tokensEl = document.getElementById('tokens');
+    const meEl = document.getElementById('me');
+    const loginEl = document.getElementById('login');
+
+    function base64url(bytes) {
+      let value = '';
+      for (const byte of bytes) value += String.fromCharCode(byte);
+      return btoa(value).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    }
+
+    async function sha256(text) {
+      const input = new TextEncoder().encode(text);
+      const digest = await crypto.subtle.digest('SHA-256', input);
+      return base64url(new Uint8Array(digest));
+    }
+
+    function randomString(size) {
+      const bytes = crypto.getRandomValues(new Uint8Array(size));
+      return base64url(bytes);
+    }
+
+    async function startLogin() {
+      const verifier = randomString(48);
+      const state = randomString(24);
+      const challenge = await sha256(verifier);
+
+      sessionStorage.setItem(storageKey, JSON.stringify({ verifier, state }));
+
+      const url = new URL(issuer + '/auth');
+      url.searchParams.set('client_id', clientId);
+      url.searchParams.set('redirect_uri', redirectUri);
+      url.searchParams.set('response_type', 'code');
+      url.searchParams.set('scope', scope);
+      url.searchParams.set('code_challenge', challenge);
+      url.searchParams.set('code_challenge_method', 'S256');
+      url.searchParams.set('state', state);
+      window.location.href = url.toString();
+    }
+
+    async function handleCallback() {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('code');
+      const state = params.get('state');
+      if (!code || !state) return;
+
+      const saved = JSON.parse(sessionStorage.getItem(storageKey) || '{}');
+      if (!saved.verifier || saved.state !== state) {
+        tokensEl.textContent = 'Missing or invalid PKCE session.';
+        return;
+      }
+
+      const body = new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: clientId,
+        code,
+        redirect_uri: redirectUri,
+        code_verifier: saved.verifier
+      });
+
+      const tokenRes = await fetch(issuer + '/token', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body
+      });
+      const tokenJson = await tokenRes.json();
+      tokensEl.textContent = JSON.stringify(tokenJson, null, 2);
+
+      if (tokenRes.ok && tokenJson.access_token) {
+        const meRes = await fetch(issuer + '/me', {
+          headers: { authorization: 'Bearer ' + tokenJson.access_token }
+        });
+        const meJson = await meRes.json();
+        meEl.textContent = JSON.stringify(meJson, null, 2);
+      }
+
+      window.history.replaceState({}, document.title, '/example');
+    }
+
+    loginEl.addEventListener('click', startLogin);
+    handleCallback();
+  </script>
+</body>
+</html>

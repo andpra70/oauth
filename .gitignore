@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# env files
+.env
+
+# local data
+data/oauth/
+!data/oauth/.gitkeep
+
+# misc
+.DS_Store
+npm-debug.log*
