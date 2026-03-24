@@ -12,6 +12,7 @@ RUN npm install --omit=dev \
 
 COPY src ./src
 COPY public ./public
+COPY data/oauth ./data/oauth
 COPY .env.example ./.env.example
 
 RUN mkdir -p /app/data \
