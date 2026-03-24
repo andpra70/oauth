@@ -28,6 +28,14 @@ function appPath(path = '') {
   return new URL(String(path).replace(/^\/+/, ''), baseUrl).pathname;
 }
 
+function resolveBrowserUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return raw;
+  if (raw.startsWith('/')) return new URL(raw, window.location.origin).toString();
+  return new URL(raw, baseUrl).toString();
+}
+
 function issuerEndpoint(issuer, path) {
   return new URL(String(path).replace(/^\/+/, ''), `${String(issuer || '').replace(/\/+$/, '')}/`).toString();
 }
@@ -41,7 +49,7 @@ function getDefaults() {
   return {
     issuer: appConfig.issuer || new URL('.', baseUrl).toString().replace(/\/$/, ''),
     clientId: 'fileserver-web',
-    redirectUri: appUrl('app/callback'),
+    redirectUri: appPath('app/callback'),
     scope: 'openid profile email offline_access',
     username: 'admin',
     setupToken: '',
@@ -104,10 +112,11 @@ async function startAuthorization() {
     const { verifier, challenge } = await createPkcePair();
     const state = randomString(24);
     sessionStorage.setItem(storageKey, JSON.stringify({ verifier, state, config }));
+    const redirectUri = resolveBrowserUrl(config.redirectUri);
 
     const url = new URL(issuerEndpoint(config.issuer, 'auth'));
     url.searchParams.set('client_id', config.clientId);
-    url.searchParams.set('redirect_uri', config.redirectUri);
+    url.searchParams.set('redirect_uri', redirectUri);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('scope', config.scope || 'openid');
     url.searchParams.set('code_challenge', challenge);
@@ -140,7 +149,7 @@ async function exchangeCode(code, state) {
     grant_type: 'authorization_code',
     client_id: saved.config.clientId,
     code,
-    redirect_uri: saved.config.redirectUri,
+    redirect_uri: resolveBrowserUrl(saved.config.redirectUri),
     code_verifier: saved.verifier,
   });
 
@@ -223,7 +232,7 @@ function clearState() {
 
   const logoutUrl = new URL(issuerEndpoint(config.issuer || getDefaults().issuer, 'session/end'));
   logoutUrl.searchParams.set('client_id', config.clientId || 'fileserver-web');
-  logoutUrl.searchParams.set('post_logout_redirect_uri', appUrl('app'));
+  logoutUrl.searchParams.set('post_logout_redirect_uri', resolveBrowserUrl(appPath('app')));
   logoutUrl.searchParams.set('state', 'session-cleared');
   window.location.assign(logoutUrl);
 }
