@@ -333,7 +333,7 @@
 
     function defaults() {
       return {
-        issuer: appConfig.issuer || new URL('.', baseUrl).toString().replace(/\/$/, ''),
+        issuer: new URL('.', baseUrl).toString().replace(/\/$/, ''),
         clientId: 'fileserver-web',
         redirectUri: appPath('example/callback'),
         scope: 'openid profile email offline_access'
