@@ -47,7 +47,7 @@ function setStatus(message, type = 'info') {
 
 function getDefaults() {
   return {
-    issuer: appConfig.issuer || new URL('.', baseUrl).toString().replace(/\/$/, ''),
+    issuer: new URL('.', baseUrl).toString().replace(/\/$/, ''),
     clientId: 'fileserver-web',
     redirectUri: appPath('app/callback'),
     scope: 'openid profile email offline_access',
