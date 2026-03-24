@@ -26,6 +26,4 @@ ENV TRUST_PROXY=false
 
 EXPOSE 9000
 
-USER node
-
 CMD ["npm", "start"]
