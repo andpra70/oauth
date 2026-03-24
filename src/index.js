@@ -10,9 +10,9 @@ import argon2 from 'argon2';
 import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import { Provider } from 'oidc-provider';
-import { ensureSchema, findUserById, findUserByUsername, getClients, seedAdminFromEnv, seedClientFromEnv } from './db.js';
+import { ensureSchema, findUserById, findUserByUsername, getClients, seedAdminFromEnv, seedClientFromEnv, upsertGoogleUser } from './db.js';
 import { findAccount } from './account.js';
-import { renderConsent, renderExpiredSession, renderLogin, renderTotp } from './html.js';
+import { renderConsent, renderExpiredSession, renderLogin } from './html.js';
 import { ensureOidcStore, JsonAdapter } from './oidc-adapter.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -57,6 +57,14 @@ const loginLimiter = rateLimit({
 });
 
 const totpChallenges = new Map();
+const totpSetupSessions = new Map();
+const googleLoginStates = new Map();
+
+const googleClientId = process.env.GOOGLE_CLIENT_ID || '';
+const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
+const googleCallbackPath = process.env.GOOGLE_CALLBACK_PATH || '/auth/google/callback';
+const googleCallbackUrl = process.env.GOOGLE_CALLBACK_URL || new URL(googleCallbackPath, issuer).toString();
+const googleEnabled = Boolean(googleClientId && googleClientSecret);
 
 function getQrSetupUrl() {
   const setupToken = process.env.SETUP_TOKEN || '';
@@ -65,9 +73,8 @@ function getQrSetupUrl() {
   return `/setup/2fa-qr/${encodeURIComponent(adminUser)}?token=${encodeURIComponent(setupToken)}`;
 }
 
-async function getQrSetupPayload(username) {
-  const user = findUserByUsername(username);
-  if (!user?.totp_secret) {
+async function buildQrSetupPayload(user) {
+  if (!user?.totp_secret || !user?.username) {
     return null;
   }
 
@@ -85,6 +92,11 @@ async function getQrSetupPayload(username) {
   };
 }
 
+async function getQrSetupPayload(username) {
+  const user = findUserByUsername(username);
+  return buildQrSetupPayload(user);
+}
+
 function createTotpChallenge(uid, accountId) {
   const challenge = randomUUID();
   totpChallenges.set(challenge, {
@@ -95,6 +107,123 @@ function createTotpChallenge(uid, accountId) {
   return challenge;
 }
 
+function createTotpSetupSession(uid, accountId) {
+  const token = randomUUID();
+  totpSetupSessions.set(token, {
+    uid,
+    accountId,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+  return token;
+}
+
+function getInteractionQrSetupUrl(uid, accountId) {
+  const token = createTotpSetupSession(uid, accountId);
+  return `/interaction/${encodeURIComponent(uid)}/2fa-qr?token=${encodeURIComponent(token)}`;
+}
+
+function getTotpSetupSession(token, uid) {
+  const data = totpSetupSessions.get(token);
+  if (!data) return null;
+  if (data.uid !== uid) return null;
+  if (Date.now() > data.expiresAt) {
+    totpSetupSessions.delete(token);
+    return null;
+  }
+  return data;
+}
+
+function getGoogleLoginUrl(uid) {
+  return `/interaction/${encodeURIComponent(uid)}/login/google`;
+}
+
+function getGoogleRegisterUrl(uid) {
+  return `/interaction/${encodeURIComponent(uid)}/register/google`;
+}
+
+function createGoogleState(uid) {
+  const state = randomUUID();
+  googleLoginStates.set(state, {
+    uid,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+  return state;
+}
+
+function consumeGoogleState(state) {
+  const data = googleLoginStates.get(state);
+  googleLoginStates.delete(state);
+  if (!data) return null;
+  if (Date.now() > data.expiresAt) return null;
+  return data;
+}
+
+async function exchangeGoogleCode(code) {
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      code,
+      client_id: googleClientId,
+      client_secret: googleClientSecret,
+      redirect_uri: googleCallbackUrl,
+      grant_type: 'authorization_code',
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google token exchange failed with status ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function fetchGoogleProfile(accessToken) {
+  const response = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google userinfo failed with status ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function startGoogleAuth(req, res, next) {
+  try {
+    if (!googleEnabled) {
+      res.status(404).send('Google login is not configured');
+      return;
+    }
+
+    const { uid } = req.params;
+    await provider.interactionDetails(req, res);
+
+    const state = createGoogleState(uid);
+    const redirectUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    redirectUrl.searchParams.set('client_id', googleClientId);
+    redirectUrl.searchParams.set('redirect_uri', googleCallbackUrl);
+    redirectUrl.searchParams.set('response_type', 'code');
+    redirectUrl.searchParams.set('scope', 'openid profile email');
+    redirectUrl.searchParams.set('state', state);
+    redirectUrl.searchParams.set('access_type', 'online');
+    redirectUrl.searchParams.set('prompt', 'select_account');
+
+    res.redirect(redirectUrl.toString());
+  } catch (err) {
+    if (isMissingInteractionSession(err)) {
+      respondExpiredSession(res);
+      return;
+    }
+    next(err);
+  }
+}
+
 function consumeTotpChallenge(challenge, uid) {
   const data = totpChallenges.get(challenge);
   totpChallenges.delete(challenge);
@@ -102,6 +231,17 @@ function consumeTotpChallenge(challenge, uid) {
   if (data.uid !== uid) return null;
   if (Date.now() > data.expiresAt) return null;
   return data;
+}
+
+function verifyTotpToken(user, otp) {
+  if (!user?.totp_secret) return false;
+
+  return speakeasy.totp.verify({
+    secret: user.totp_secret,
+    encoding: 'base32',
+    token: String(otp).replace(/\s+/g, ''),
+    window: 1,
+  });
 }
 
 function isMissingInteractionSession(error) {
@@ -117,6 +257,12 @@ setInterval(() => {
   const now = Date.now();
   for (const [key, value] of totpChallenges.entries()) {
     if (value.expiresAt < now) totpChallenges.delete(key);
+  }
+  for (const [key, value] of totpSetupSessions.entries()) {
+    if (value.expiresAt < now) totpSetupSessions.delete(key);
+  }
+  for (const [key, value] of googleLoginStates.entries()) {
+    if (value.expiresAt < now) googleLoginStates.delete(key);
   }
 }, 30_000).unref();
 
@@ -264,6 +410,24 @@ app.get('/setup/2fa-qr/:username.json', async (req, res) => {
   res.json(payload);
 });
 
+app.get('/interaction/:uid/2fa-qr', async (req, res) => {
+  const { uid } = req.params;
+  const token = String(req.query.token || '');
+  const pending = getTotpSetupSession(token, uid);
+  if (!pending) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const user = findUserById(pending.accountId);
+  const payload = await buildQrSetupPayload(user);
+  if (!payload) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(`<img alt="qr" src="${payload.dataUrl}" /><p>${payload.otpauthUrl}</p>`);
+});
+
 app.get('/interaction/:uid', async (req, res, next) => {
   try {
     const details = await provider.interactionDetails(req, res);
@@ -271,7 +435,7 @@ app.get('/interaction/:uid', async (req, res, next) => {
 
     if (prompt.name === 'login') {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({ uid }));
+      res.end(renderLogin({ uid, googleLoginUrl: getGoogleLoginUrl(uid), googleRegisterUrl: getGoogleRegisterUrl(uid) }));
       return;
     }
 
@@ -291,12 +455,69 @@ app.get('/interaction/:uid', async (req, res, next) => {
 app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, next) => {
   try {
     const { uid } = req.params;
-    const { username = '', password = '' } = req.body;
+    const { username = '', password = '', otp = '', challenge = '' } = req.body;
+
+    if (challenge) {
+      const pending = consumeTotpChallenge(challenge, uid);
+      if (!pending) {
+        res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.end(renderLogin({
+          uid,
+          error: 'Session expired. Sign in again.',
+          googleLoginUrl: getGoogleLoginUrl(uid),
+          googleRegisterUrl: getGoogleRegisterUrl(uid),
+        }));
+        return;
+      }
+
+      const resolvedUser = findUserById(pending.accountId);
+      if (!resolvedUser) {
+        res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.end(renderLogin({
+          uid,
+          error: 'Unknown account. Sign in again.',
+          googleLoginUrl: getGoogleLoginUrl(uid),
+          googleRegisterUrl: getGoogleRegisterUrl(uid),
+        }));
+        return;
+      }
+
+      if (!verifyTotpToken(resolvedUser, otp)) {
+        const retryChallenge = createTotpChallenge(uid, resolvedUser.id);
+        res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.end(renderLogin({
+          uid,
+          username: resolvedUser.username,
+          otp,
+          error: 'Invalid verification code',
+          googleChallenge: retryChallenge,
+          googleAccountLabel: resolvedUser.email || resolvedUser.username,
+          qrSetupUrl: getInteractionQrSetupUrl(uid, resolvedUser.id),
+        }));
+        return;
+      }
+
+      const result = {
+        login: {
+          accountId: resolvedUser.id,
+          remember: false,
+        },
+      };
+
+      await provider.interactionFinished(req, res, result, { mergeWithLastSubmission: false });
+      return;
+    }
 
     const user = findUserByUsername(username.trim());
-    if (!user) {
+    if (!user || !user.password_hash) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({ uid, username, error: 'Invalid credentials' }));
+      res.end(renderLogin({
+        uid,
+        username,
+        error: 'Invalid credentials',
+        googleLoginUrl: getGoogleLoginUrl(uid),
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+      }));
       return;
     }
 
@@ -305,15 +526,29 @@ app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
     });
     if (!passwordOk) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({ uid, username, error: 'Invalid credentials' }));
+      res.end(renderLogin({
+        uid,
+        username,
+        error: 'Invalid credentials',
+        googleLoginUrl: getGoogleLoginUrl(uid),
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+      }));
       return;
     }
 
     if (user.totp_enabled) {
-      const challenge = createTotpChallenge(uid, user.id);
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderTotp({ uid, challenge, qrSetupUrl: getQrSetupUrl() }));
-      return;
+      if (!verifyTotpToken(user, otp)) {
+        res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.end(renderLogin({
+          uid,
+          username,
+          error: otp ? 'Invalid verification code' : 'Authenticator code is required',
+          qrSetupUrl: getInteractionQrSetupUrl(uid, user.id),
+          googleLoginUrl: getGoogleLoginUrl(uid),
+          googleRegisterUrl: getGoogleRegisterUrl(uid),
+        }));
+        return;
+      }
     }
 
     const result = {
@@ -329,6 +564,83 @@ app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
       respondExpiredSession(res);
       return;
     }
+    next(err);
+  }
+});
+
+app.get('/interaction/:uid/login/google', startGoogleAuth);
+app.get('/interaction/:uid/register/google', startGoogleAuth);
+
+app.get(googleCallbackPath, async (req, res, next) => {
+  const state = String(req.query.state || '');
+  const code = String(req.query.code || '');
+  const error = String(req.query.error || '');
+  const pending = consumeGoogleState(state);
+  const uid = pending?.uid || '';
+
+  try {
+    if (!googleEnabled) {
+      res.status(404).send('Google login is not configured');
+      return;
+    }
+
+    if (!pending || !uid) {
+      res.status(400).send('Invalid Google login state');
+      return;
+    }
+
+    if (error) {
+      res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(renderLogin({
+        uid,
+        error: 'Google login was cancelled',
+        googleLoginUrl: getGoogleLoginUrl(uid),
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+      }));
+      return;
+    }
+
+    if (!code) {
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(renderLogin({
+        uid,
+        error: 'Missing Google authorization code',
+        googleLoginUrl: getGoogleLoginUrl(uid),
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+      }));
+      return;
+    }
+
+    const tokenSet = await exchangeGoogleCode(code);
+    const profile = await fetchGoogleProfile(tokenSet.access_token);
+    const user = upsertGoogleUser(profile);
+
+    const challenge = createTotpChallenge(uid, user.id);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(renderLogin({
+      uid,
+      username: user.username,
+      googleChallenge: challenge,
+      googleAccountLabel: user.email || user.username,
+      qrSetupUrl: getInteractionQrSetupUrl(uid, user.id),
+    }));
+  } catch (err) {
+    if (uid) {
+      if (isMissingInteractionSession(err)) {
+        respondExpiredSession(res);
+        return;
+      }
+
+      res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(renderLogin({
+        uid,
+        error: 'Google login failed',
+        googleLoginUrl: getGoogleLoginUrl(uid),
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+      }));
+      return;
+    }
+
     next(err);
   }
 });
@@ -353,17 +665,18 @@ app.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, nex
       return;
     }
 
-    const valid = speakeasy.totp.verify({
-      secret: resolvedUser.totp_secret,
-      encoding: 'base32',
-      token: String(otp).replace(/\s+/g, ''),
-      window: 1,
-    });
-
-    if (!valid) {
+    if (!verifyTotpToken(resolvedUser, otp)) {
       const retryChallenge = createTotpChallenge(uid, resolvedUser.id);
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderTotp({ uid, challenge: retryChallenge, error: 'Invalid verification code', qrSetupUrl: getQrSetupUrl() }));
+      res.end(renderLogin({
+        uid,
+        username: resolvedUser.username,
+        otp,
+        error: 'Invalid verification code',
+        googleChallenge: retryChallenge,
+        googleAccountLabel: resolvedUser.email || resolvedUser.username,
+        qrSetupUrl: getInteractionQrSetupUrl(uid, resolvedUser.id),
+      }));
       return;
     }
 

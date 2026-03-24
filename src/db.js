@@ -40,6 +40,32 @@ function newId(prefix) {
   return `${prefix}_${Math.random().toString(36).slice(2, 12)}${Date.now().toString(36)}`;
 }
 
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function normalizeUsername(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+}
+
+function buildUniqueUsername(state, preferred) {
+  const base = normalizeUsername(preferred) || 'google-user';
+
+  let candidate = base;
+  let counter = 1;
+  while (state.users.some((user) => user.username === candidate)) {
+    counter += 1;
+    candidate = `${base.slice(0, Math.max(1, 28 - String(counter).length))}-${counter}`;
+  }
+
+  return candidate;
+}
+
 export function ensureSchema() {
   if (!existsSync(dbPath)) {
     saveState(defaultState());
@@ -136,6 +162,59 @@ export function findUserByUsername(username) {
 export function findUserById(id) {
   const state = loadState();
   return state.users.find((user) => user.id === id);
+}
+
+export function findUserByGoogleSubject(googleSubject) {
+  const state = loadState();
+  return state.users.find((user) => user.google_subject === googleSubject);
+}
+
+export function upsertGoogleUser(profile) {
+  const state = loadState();
+  const googleSubject = String(profile.sub || '').trim();
+  const email = normalizeEmail(profile.email);
+  if (!googleSubject) {
+    throw new Error('Google subject is required');
+  }
+
+  const existing = state.users.find((user) => user.google_subject === googleSubject);
+  const timestamp = nowIso();
+
+  if (existing) {
+    const secret = existing.totp_secret
+      ? null
+      : speakeasy.generateSecret({ name: `OAuth2 (${existing.username || profile.email || 'google-user'})` });
+    existing.google_subject = googleSubject;
+    existing.auth_provider = 'google';
+    existing.email = email || existing.email || null;
+    if (!existing.username) {
+      existing.username = buildUniqueUsername(state, profile.email || profile.name || 'google-user');
+    }
+    if (!existing.totp_secret && secret?.base32) {
+      existing.totp_secret = secret.base32;
+    }
+    existing.totp_enabled = 1;
+    existing.updated_at = timestamp;
+    saveState(state);
+    return existing;
+  }
+
+  const secret = speakeasy.generateSecret({ name: `OAuth2 (${profile.email || profile.name || 'google-user'})` });
+  const user = {
+    id: newId('usr'),
+    username: buildUniqueUsername(state, profile.email || profile.name || 'google-user'),
+    email: email || null,
+    auth_provider: 'google',
+    google_subject: googleSubject,
+    totp_secret: secret.base32,
+    totp_enabled: 1,
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+
+  state.users.push(user);
+  saveState(state);
+  return user;
 }
 
 export function getClients() {
