@@ -5,77 +5,350 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OAuth Example</title>
   <style>
+    :root {
+      --bg: #f4efe8;
+      --panel: #fffdf8;
+      --ink: #1f1a14;
+      --muted: #6f675c;
+      --line: #e7ddd0;
+      --accent: #176b5a;
+      --accent-alt: #2f4f9d;
+      --accent-soft: #eef6f4;
+      --danger: #a5482b;
+      --shadow: 0 18px 40px rgba(34, 24, 12, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
     body {
       margin: 0;
+      min-height: 100vh;
       font-family: system-ui, sans-serif;
-      background: #f7f7f5;
-      color: #171717;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(23, 107, 90, 0.12), transparent 24%),
+        radial-gradient(circle at top right, rgba(47, 79, 157, 0.14), transparent 26%),
+        linear-gradient(180deg, #f7f3ec 0%, var(--bg) 100%);
     }
+
     main {
-      max-width: 760px;
-      margin: 40px auto;
-      padding: 0 16px;
+      width: min(980px, calc(100% - 28px));
+      margin: 28px auto;
+      display: grid;
+      gap: 18px;
     }
+
+    .hero,
     .card {
-      background: #fff;
-      border: 1px solid #e5e5e5;
-      border-radius: 16px;
+      background: rgba(255, 253, 248, 0.94);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      padding: 24px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .hero h1,
+    .card h2 {
+      margin: 0;
+    }
+
+    .hero p,
+    .muted {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 18px;
+    }
+
+    .card {
       padding: 20px;
-      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.05);
+      display: grid;
+      gap: 14px;
     }
-    h1, h2 { margin-top: 0; }
-    button {
-      border: 0;
-      border-radius: 10px;
-      padding: 12px 16px;
-      background: #111827;
-      color: white;
-      font: inherit;
-      cursor: pointer;
+
+    .fields {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
     }
-    pre {
-      background: #111827;
-      color: #f9fafb;
-      padding: 14px;
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .field.full {
+      grid-column: 1 / -1;
+    }
+
+    label {
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+
+    input {
+      width: 100%;
+      border: 1px solid var(--line);
       border-radius: 12px;
+      padding: 11px 13px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button,
+    .button-link {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 16px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    .primary {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .secondary {
+      background: var(--accent-alt);
+      color: #fff;
+    }
+
+    .ghost {
+      background: transparent;
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
+
+    .status {
+      min-height: 48px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: var(--accent-soft);
+      color: #18463d;
+      line-height: 1.45;
+    }
+
+    .status.error {
+      background: #f9ebe7;
+      color: var(--danger);
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #f0e7da;
+      color: #5f5649;
+      font-size: 0.82rem;
+      font-weight: 700;
+    }
+
+    ol {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    pre {
+      margin: 0;
+      padding: 14px;
+      border-radius: 14px;
+      background: #171717;
+      color: #fafaf9;
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
     }
-    .muted { color: #525252; }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92em;
+    }
+
+    @media (max-width: 860px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .fields {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
 <body>
   <main>
-    <div class="card">
-      <h1>OAuth Example</h1>
-      <p class="muted">Example minimo servito dallo stesso server. Avvia Authorization Code + PKCE, completa login/TOTP e mostra token e userinfo.</p>
-      <p><button id="login">Login with OAuth</button></p>
-      <p class="muted"><a href="/app">Open full console</a></p>
+    <section class="hero">
+      <div class="pill-row">
+        <span class="pill">Authorization Code</span>
+        <span class="pill">PKCE S256</span>
+        <span class="pill">Local Login</span>
+        <span class="pill">Google Sign-In</span>
+      </div>
+      <h1>OAuth End-to-End Example</h1>
+      <p>
+        Questa pagina avvia il flow OIDC completo, gestisce il callback, scambia il code con i token,
+        legge <code>/me</code> e permette di chiudere la sessione. Nella schermata server-side di login
+        puoi usare credenziali locali, <strong>Accedi con Google</strong> oppure <strong>Registrati con Google</strong>.
+      </p>
+      <p class="muted">Console completa: <a href="/app">/app</a></p>
+    </section>
 
-      <h2>Tokens</h2>
-      <pre id="tokens">No tokens yet.</pre>
+    <section class="grid">
+      <section class="card">
+        <h2>Avvio rapido</h2>
+        <div class="fields">
+          <div class="field">
+            <label for="issuer">Issuer</label>
+            <input id="issuer" />
+          </div>
+          <div class="field">
+            <label for="clientId">Client ID</label>
+            <input id="clientId" />
+          </div>
+          <div class="field full">
+            <label for="redirectUri">Redirect URI</label>
+            <input id="redirectUri" />
+          </div>
+          <div class="field full">
+            <label for="scope">Scope</label>
+            <input id="scope" />
+          </div>
+        </div>
 
-      <h2>UserInfo</h2>
-      <pre id="me">No profile yet.</pre>
-    </div>
+        <div class="actions">
+          <button id="startAuth" class="primary">Avvia login OAuth</button>
+          <button id="loadProfile" class="ghost">Ricarica profilo</button>
+          <button id="clearState" class="ghost">Logout e reset</button>
+        </div>
+
+        <div id="status" class="status">Pronto. Premi "Avvia login OAuth" per iniziare.</div>
+
+        <h2>Tokens</h2>
+        <pre id="tokens">Nessun token disponibile.</pre>
+
+        <h2>UserInfo</h2>
+        <pre id="me">Nessun profilo caricato.</pre>
+      </section>
+
+      <aside class="card">
+        <h2>Cosa copre</h2>
+        <ol>
+          <li>Genera <code>state</code>, <code>code_verifier</code> e <code>code_challenge</code>.</li>
+          <li>Chiama <code>/auth</code> con Authorization Code + PKCE.</li>
+          <li>Passa dalla pagina di login server-side.</li>
+          <li>Completa il callback su <code>/example/callback</code>.</li>
+          <li>Esegue <code>POST /token</code> e poi <code>GET /me</code>.</li>
+        </ol>
+
+        <h2>Login disponibili</h2>
+        <ol>
+          <li>Login locale con username/password e TOTP se abilitato.</li>
+          <li><code>Accedi con Google</code> per un account Google già noto.</li>
+          <li><code>Registrati con Google</code> per creare il record utente in <code>db.json</code>.</li>
+        </ol>
+
+        <h2>Note</h2>
+        <p class="muted">
+          Il pulsante Google compare solo se il server è configurato con
+          <code>GOOGLE_CLIENT_ID</code> e <code>GOOGLE_CLIENT_SECRET</code>.
+        </p>
+      </aside>
+    </section>
   </main>
 
   <script>
-    const clientId = 'fileserver-web';
-    const issuer = window.location.origin;
-    const redirectUri = issuer + '/example/callback';
-    const scope = 'openid profile email offline_access';
     const storageKey = 'oauth-example';
 
-    const tokensEl = document.getElementById('tokens');
-    const meEl = document.getElementById('me');
-    const loginEl = document.getElementById('login');
+    const el = {
+      issuer: document.getElementById('issuer'),
+      clientId: document.getElementById('clientId'),
+      redirectUri: document.getElementById('redirectUri'),
+      scope: document.getElementById('scope'),
+      startAuth: document.getElementById('startAuth'),
+      loadProfile: document.getElementById('loadProfile'),
+      clearState: document.getElementById('clearState'),
+      status: document.getElementById('status'),
+      tokens: document.getElementById('tokens'),
+      me: document.getElementById('me')
+    };
+
+    function defaults() {
+      const origin = window.location.origin;
+      return {
+        issuer: origin,
+        clientId: 'fileserver-web',
+        redirectUri: origin + '/example/callback',
+        scope: 'openid profile email offline_access'
+      };
+    }
+
+    function setStatus(message, isError = false) {
+      el.status.textContent = message;
+      el.status.classList.toggle('error', isError);
+    }
+
+    function writeConfig(config) {
+      el.issuer.value = config.issuer;
+      el.clientId.value = config.clientId;
+      el.redirectUri.value = config.redirectUri;
+      el.scope.value = config.scope;
+    }
+
+    function readConfig() {
+      return {
+        issuer: el.issuer.value.trim().replace(/\/+$/, ''),
+        clientId: el.clientId.value.trim(),
+        redirectUri: el.redirectUri.value.trim(),
+        scope: el.scope.value.trim()
+      };
+    }
 
     function base64url(bytes) {
       let value = '';
       for (const byte of bytes) value += String.fromCharCode(byte);
       return btoa(value).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    }
+
+    function randomString(size) {
+      const bytes = crypto.getRandomValues(new Uint8Array(size));
+      return base64url(bytes);
     }
 
     async function sha256(text) {
@@ -84,70 +357,182 @@
       return base64url(new Uint8Array(digest));
     }
 
-    function randomString(size) {
-      const bytes = crypto.getRandomValues(new Uint8Array(size));
-      return base64url(bytes);
+    function saveSession(data) {
+      sessionStorage.setItem(storageKey, JSON.stringify(data));
     }
 
-    async function startLogin() {
-      const verifier = randomString(48);
-      const state = randomString(24);
-      const challenge = await sha256(verifier);
+    function loadSession() {
+      return JSON.parse(sessionStorage.getItem(storageKey) || '{}');
+    }
 
-      sessionStorage.setItem(storageKey, JSON.stringify({ verifier, state }));
+    async function startAuth() {
+      const config = readConfig();
+      if (!config.issuer || !config.clientId || !config.redirectUri) {
+        setStatus('Issuer, client ID e redirect URI sono obbligatori.', true);
+        return;
+      }
 
-      const url = new URL(issuer + '/auth');
-      url.searchParams.set('client_id', clientId);
-      url.searchParams.set('redirect_uri', redirectUri);
-      url.searchParams.set('response_type', 'code');
-      url.searchParams.set('scope', scope);
-      url.searchParams.set('code_challenge', challenge);
-      url.searchParams.set('code_challenge_method', 'S256');
-      url.searchParams.set('state', state);
-      window.location.href = url.toString();
+      el.startAuth.disabled = true;
+      try {
+        const verifier = randomString(48);
+        const state = randomString(24);
+        const challenge = await sha256(verifier);
+
+        saveSession({ verifier, state, config });
+
+        const url = new URL(config.issuer + '/auth');
+        url.searchParams.set('client_id', config.clientId);
+        url.searchParams.set('redirect_uri', config.redirectUri);
+        url.searchParams.set('response_type', 'code');
+        url.searchParams.set('scope', config.scope || 'openid');
+        url.searchParams.set('code_challenge', challenge);
+        url.searchParams.set('code_challenge_method', 'S256');
+        url.searchParams.set('state', state);
+
+        setStatus('Redirect verso il provider in corso...');
+        window.location.assign(url.toString());
+      } catch (error) {
+        setStatus(error.message || 'Errore nella preparazione del flow.', true);
+      } finally {
+        el.startAuth.disabled = false;
+      }
+    }
+
+    async function loadUserInfo(issuer, accessToken) {
+      const response = await fetch(issuer + '/me', {
+        headers: {
+          authorization: 'Bearer ' + accessToken
+        }
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error_description || payload.error || 'UserInfo non disponibile.');
+      }
+
+      el.me.textContent = JSON.stringify(payload, null, 2);
+      return payload;
+    }
+
+    async function exchangeCode(code, state) {
+      const saved = loadSession();
+      if (!saved.verifier || saved.state !== state || !saved.config) {
+        throw new Error('Sessione PKCE mancante o non valida.');
+      }
+
+      writeConfig(saved.config);
+
+      const body = new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: saved.config.clientId,
+        code,
+        redirect_uri: saved.config.redirectUri,
+        code_verifier: saved.verifier
+      });
+
+      const response = await fetch(saved.config.issuer + '/token', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded'
+        },
+        body
+      });
+
+      const payload = await response.json();
+      el.tokens.textContent = JSON.stringify(payload, null, 2);
+
+      if (!response.ok) {
+        throw new Error(payload.error_description || payload.error || 'Token exchange fallito.');
+      }
+
+      saveSession({ ...saved, tokens: payload });
+
+      if (payload.access_token) {
+        await loadUserInfo(saved.config.issuer, payload.access_token);
+      }
+    }
+
+    async function reloadProfile() {
+      try {
+        const saved = loadSession();
+        const issuer = saved.config?.issuer || readConfig().issuer;
+        const accessToken = saved.tokens?.access_token;
+        if (!issuer || !accessToken) {
+          setStatus('Nessun access token salvato. Completa prima il login.', true);
+          return;
+        }
+
+        await loadUserInfo(issuer, accessToken);
+        setStatus('Profilo ricaricato da /me.');
+      } catch (error) {
+        setStatus(error.message || 'Errore nel caricamento del profilo.', true);
+      }
+    }
+
+    function clearState() {
+      const saved = loadSession();
+      const config = saved.config || readConfig();
+
+      sessionStorage.removeItem(storageKey);
+      el.tokens.textContent = 'Nessun token disponibile.';
+      el.me.textContent = 'Nessun profilo caricato.';
+      setStatus('Reset locale completato. Chiusura sessione OIDC in corso...');
+
+      const url = new URL((config.issuer || window.location.origin) + '/session/end');
+      url.searchParams.set('client_id', config.clientId || 'fileserver-web');
+      url.searchParams.set('post_logout_redirect_uri', window.location.origin + '/example');
+      url.searchParams.set('state', 'example-session-cleared');
+      window.location.assign(url.toString());
     }
 
     async function handleCallback() {
       const params = new URLSearchParams(window.location.search);
-      const code = params.get('code');
-      const state = params.get('state');
-      if (!code || !state) return;
 
-      const saved = JSON.parse(sessionStorage.getItem(storageKey) || '{}');
-      if (!saved.verifier || saved.state !== state) {
-        tokensEl.textContent = 'Missing or invalid PKCE session.';
+      if (params.get('state') === 'example-session-cleared' && !params.get('code') && !params.get('error')) {
+        setStatus('Sessione locale e sessione OIDC pulite.');
+        window.history.replaceState({}, document.title, '/example');
         return;
       }
 
-      const body = new URLSearchParams({
-        grant_type: 'authorization_code',
-        client_id: clientId,
-        code,
-        redirect_uri: redirectUri,
-        code_verifier: saved.verifier
-      });
-
-      const tokenRes = await fetch(issuer + '/token', {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        body
-      });
-      const tokenJson = await tokenRes.json();
-      tokensEl.textContent = JSON.stringify(tokenJson, null, 2);
-
-      if (tokenRes.ok && tokenJson.access_token) {
-        const meRes = await fetch(issuer + '/me', {
-          headers: { authorization: 'Bearer ' + tokenJson.access_token }
-        });
-        const meJson = await meRes.json();
-        meEl.textContent = JSON.stringify(meJson, null, 2);
+      if (params.get('error')) {
+        setStatus((params.get('error_description') || params.get('error')), true);
+        return;
       }
 
-      window.history.replaceState({}, document.title, '/example');
+      const code = params.get('code');
+      const state = params.get('state');
+      if (!code || !state) {
+        return;
+      }
+
+      setStatus('Callback ricevuto. Scambio del code in corso...');
+      try {
+        await exchangeCode(code, state);
+        setStatus('Flow completato. Token e profilo caricati.');
+        window.history.replaceState({}, document.title, '/example');
+      } catch (error) {
+        setStatus(error.message || 'Errore durante il callback.', true);
+      }
     }
 
-    loginEl.addEventListener('click', startLogin);
-    handleCallback();
+    function bootstrap() {
+      writeConfig(defaults());
+      el.startAuth.addEventListener('click', startAuth);
+      el.loadProfile.addEventListener('click', reloadProfile);
+      el.clearState.addEventListener('click', clearState);
+
+      const saved = loadSession();
+      if (saved.config) {
+        writeConfig({ ...defaults(), ...saved.config });
+      }
+      if (saved.tokens) {
+        el.tokens.textContent = JSON.stringify(saved.tokens, null, 2);
+      }
+
+      handleCallback();
+    }
+
+    bootstrap();
   </script>
 </body>
 </html>

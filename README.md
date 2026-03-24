@@ -1,6 +1,6 @@
 # OAuth2/OIDC Server (with 2FA)
 
-Authorization server separato basato su `oidc-provider` con login username/password + TOTP.
+Authorization server separato basato su `oidc-provider` con login username/password + TOTP oppure Google Sign-In.
 
 ## Avvio locale
 
@@ -72,13 +72,16 @@ Endpoint interni di interaction usati dal login browser-based:
 
 - `GET /interaction/:uid`
 - `POST /interaction/:uid/login`
+- `GET /interaction/:uid/login/google`
+- `GET /interaction/:uid/register/google`
 - `POST /interaction/:uid/2fa`
 - `POST /interaction/:uid/confirm`
 - `POST /interaction/:uid/abort`
+- `GET /auth/google/callback`
 
 ## Sequenza di autenticazione
 
-Flow supportato: Authorization Code + PKCE `S256`, con login username/password, 2FA TOTP e consenso.
+Flow supportato: Authorization Code + PKCE `S256`, con login username/password, 2FA TOTP, Google Sign-In e consenso.
 
 1. Recupera la configurazione OIDC:
 
@@ -92,9 +95,9 @@ curl http://localhost:9000/.well-known/openid-configuration
 
 4. Il server reindirizza il browser su `GET /interaction/:uid` e mostra il form di login.
 
-5. Invia username e password a `POST /interaction/:uid/login`.
+5. Invia username e password a `POST /interaction/:uid/login`, oppure usa `Accedi con Google` o `Registrati con Google`.
 
-6. Se l'utente ha 2FA attivo, il server mostra il form TOTP e devi inviare il codice a `POST /interaction/:uid/2fa`.
+6. Se fai login locale e l'utente ha 2FA attivo, il server mostra il form TOTP e devi inviare il codice a `POST /interaction/:uid/2fa`.
 
 7. Se richiesto, il server mostra il consenso e devi confermare con `POST /interaction/:uid/confirm`.
 
@@ -138,6 +141,74 @@ curl "http://localhost:9000/setup/2fa-qr/admin?token=replace-with-bootstrap-toke
 ```
 
 In alternativa puoi passare il token nell'header `x-setup-token`.
+
+## Setup Google Login
+
+Per abilitare il login con Google:
+
+1. Apri Google Cloud Console e seleziona o crea un progetto.
+2. Vai in `APIs & Services` -> `OAuth consent screen` e configura l'app.
+3. Se l'app è in testing, aggiungi gli account Google che userai in `Test users`.
+4. Vai in `APIs & Services` -> `Credentials` -> `Create Credentials` -> `OAuth client ID`.
+5. Scegli `Web application`.
+6. Aggiungi tra gli `Authorized redirect URI`:
+
+```text
+http://localhost:9000/auth/google/callback
+```
+
+Se usi un dominio o una porta diversa, il valore deve coincidere esattamente con `GOOGLE_CALLBACK_URL`.
+
+7. Copia `Client ID` e `Client Secret` nel file `.env`.
+
+Configura queste variabili:
+
+```bash
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_CALLBACK_PATH=/auth/google/callback
+GOOGLE_CALLBACK_URL=http://localhost:9000/auth/google/callback
+```
+
+Note operative:
+
+- `GOOGLE_CALLBACK_PATH` è il path servito da Express.
+- `GOOGLE_CALLBACK_URL` è l'URL assoluto inviato a Google e deve essere registrato nella console Google.
+- Il login Google viene mostrato nella pagina `/interaction/:uid` solo se `GOOGLE_CLIENT_ID` e `GOOGLE_CLIENT_SECRET` sono valorizzati.
+
+Avvio locale:
+
+```bash
+cp .env.example .env
+npm run dev
+```
+
+Test del flow:
+
+1. Apri `http://localhost:9000/app`.
+2. Avvia il login OAuth come già previsto dalla demo.
+3. Nella schermata di autenticazione usa `Accedi con Google` o `Registrati con Google`.
+4. Completa il consenso Google.
+5. Al ritorno sul server, il login OIDC locale viene completato automaticamente.
+
+Al primo login Google, il server crea o aggiorna automaticamente un utente in `./data/oauth/db.json` con `auth_provider: "google"` e `google_subject`.
+
+Esempio di record utente creato:
+
+```json
+{
+  "id": "usr_xxxxx",
+  "username": "mario.rossi-gmail.com",
+  "email": "mario.rossi@gmail.com",
+  "auth_provider": "google",
+  "google_subject": "123456789012345678901",
+  "totp_enabled": 0,
+  "created_at": "2026-03-22T12:00:00.000Z",
+  "updated_at": "2026-03-22T12:00:00.000Z"
+}
+```
+
+Il login username/password resta invariato per gli utenti locali già presenti nel database.
 
 ## Sicurezza implementata
 
