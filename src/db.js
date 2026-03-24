@@ -4,6 +4,28 @@ import speakeasy from 'speakeasy';
 
 const dbPath = 'data/oauth/db.json';
 
+function normalizeBasePath(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw === '/') return '';
+  return `/${raw.replace(/^\/+|\/+$/g, '')}`;
+}
+
+function buildDefaultClientUrls() {
+  const issuer = process.env.ISSUER || 'http://localhost:9000';
+  const issuerUrl = new URL(issuer);
+  const basePath = normalizeBasePath(process.env.BASE_PATH || issuerUrl.pathname);
+  const baseUrl = new URL(basePath ? `${basePath}/` : '/', issuerUrl.origin);
+  const callbackApp = new URL('app/callback', baseUrl).toString();
+  const callbackExample = new URL('example/callback', baseUrl).toString();
+  const postLogoutApp = new URL('app', baseUrl).toString();
+  const postLogoutExample = new URL('example', baseUrl).toString();
+
+  return {
+    redirectUris: `${callbackApp},${callbackExample}`,
+    postLogoutRedirectUris: `${postLogoutApp},${postLogoutExample}`,
+  };
+}
+
 function defaultState() {
   return {
     users: [],
@@ -119,11 +141,12 @@ export function seedClientFromEnv() {
   const clientId = process.env.DEFAULT_CLIENT_ID || 'fileserver-web';
   const authMethod = process.env.DEFAULT_CLIENT_AUTH_METHOD || 'none';
   const clientSecret = process.env.DEFAULT_CLIENT_SECRET || '';
-  const redirectUris = (process.env.DEFAULT_CLIENT_REDIRECT_URIS || process.env.DEFAULT_CLIENT_REDIRECT_URI || 'http://localhost:9000/app/callback,http://localhost:9000/example/callback')
+  const defaultClientUrls = buildDefaultClientUrls();
+  const redirectUris = (process.env.DEFAULT_CLIENT_REDIRECT_URIS || process.env.DEFAULT_CLIENT_REDIRECT_URI || defaultClientUrls.redirectUris)
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean);
-  const postLogoutRedirectUris = (process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS || process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URI || 'http://localhost:9000/app,http://localhost:9000/example')
+  const postLogoutRedirectUris = (process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS || process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URI || defaultClientUrls.postLogoutRedirectUris)
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean);

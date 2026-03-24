@@ -7,6 +7,12 @@ export function escapeHtml(value = '') {
     .replaceAll("'", '&#039;');
 }
 
+function resolvePath(basePath, path) {
+  const normalizedBase = basePath === '/' ? '' : String(basePath || '').replace(/\/+$/g, '');
+  const normalizedPath = String(path || '/').startsWith('/') ? String(path || '/') : `/${String(path || '/')}`;
+  return normalizedBase ? `${normalizedBase}${normalizedPath}` : normalizedPath;
+}
+
 function renderQrSection(qrSetupUrl) {
   if (!qrSetupUrl) return '';
 
@@ -53,6 +59,7 @@ function page(title, body) {
 }
 
 export function renderLogin({
+  basePath = '',
   uid,
   error = '',
   username = '',
@@ -70,7 +77,7 @@ export function renderLogin({
     <h2>Sign in</h2>
     <p class="hint">Use your username, password and Authenticator code in one step. Google login registers or updates the user and then returns here for TOTP verification.</p>
     <div class="auth-grid ${hasQr ? 'has-qr' : ''}">
-      <form method="post" action="/interaction/${escapeHtml(uid)}/login">
+      <form method="post" action="${escapeHtml(resolvePath(basePath, `/interaction/${uid}/login`))}">
         ${isGoogleTotp ? `<input type="hidden" name="challenge" value="${escapeHtml(googleChallenge)}" />` : ''}
         ${isGoogleTotp
           ? `<p class="hint">Google account: <strong>${escapeHtml(googleAccountLabel || username)}</strong></p>`
@@ -97,31 +104,31 @@ export function renderLogin({
   `);
 }
 
-export function renderConsent({ uid, clientName, scope }) {
+export function renderConsent({ basePath = '', uid, clientName, scope }) {
   return page('Authorize application', `
     <h2>Authorize application</h2>
     <p><strong>${escapeHtml(clientName)}</strong> requests access.</p>
     <p class="hint">Requested scope: ${escapeHtml(scope || 'openid')}</p>
     <div class="actions">
-      <form method="post" action="/interaction/${escapeHtml(uid)}/confirm">
+      <form method="post" action="${escapeHtml(resolvePath(basePath, `/interaction/${uid}/confirm`))}">
         <button type="submit">Allow</button>
       </form>
-      <form method="post" action="/interaction/${escapeHtml(uid)}/abort">
+      <form method="post" action="${escapeHtml(resolvePath(basePath, `/interaction/${uid}/abort`))}">
         <button class="secondary" type="submit">Deny</button>
       </form>
     </div>
   `);
 }
 
-export function renderExpiredSession() {
+export function renderExpiredSession({ basePath = '' } = {}) {
   return page('Session expired', `
     <h2>Session expired</h2>
     <p class="hint">The interaction is no longer valid. Start a new OAuth login flow.</p>
     <div class="actions">
-      <form method="get" action="/app">
+      <form method="get" action="${escapeHtml(resolvePath(basePath, '/app'))}">
         <button type="submit">Open OAuth Console</button>
       </form>
-      <form method="get" action="/">
+      <form method="get" action="${escapeHtml(resolvePath(basePath, '/'))}">
         <button class="secondary" type="submit">Go to home</button>
       </form>
     </div>
