@@ -13,7 +13,8 @@ HOST_PORT="${HOST_PORT:-9000}"
 CONTAINER_PORT="${CONTAINER_PORT:-9000}"
 ENV_FILE="${ENV_FILE:-.env}"
 DATA_DIR="${DATA_DIR:-$SCRIPT_DIR/data/oauth}"
-PULL_IMAGE="${PULL_IMAGE:-true}"
+BUILD_IMAGE="${BUILD_IMAGE:-true}"
+PULL_IMAGE="${PULL_IMAGE:-false}"
 
 IMAGE_REF="${REGISTRY}/${IMAGE_NAME}:${TAG}"
 
@@ -31,12 +32,17 @@ if [[ "${PULL_IMAGE}" == "true" && "${IMAGE_REF}" == */* ]]; then
   docker pull "${IMAGE_REF}"
 fi
 
+if [[ "${BUILD_IMAGE}" == "true" ]]; then
+  echo "Building ${IMAGE_REF}"
+  docker build -t "${IMAGE_REF}" .
+fi
+
 RUN_ARGS=(
   -d
   --name "${CONTAINER_NAME}"
   --restart unless-stopped
   -p "${HOST_PORT}:${CONTAINER_PORT}"
-  -v "${DATA_DIR}:/app/data"
+  -v "${DATA_DIR}:/app/data/oauth"
 )
 
 if [[ -f "${ENV_FILE}" ]]; then

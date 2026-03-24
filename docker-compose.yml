@@ -5,7 +5,6 @@ services:
       dockerfile: Dockerfile
     image: ${OAUTH_SERVER_IMAGE:-docker.io/andpra70/oauth-server:latest}
     restart: ${OAUTH_SERVER_RESTART:-unless-stopped}
-    user: "${OAUTH_SERVER_UID:-1000}:${OAUTH_SERVER_GID:-1000}"
     environment:
       BASE_PATH: ${BASE_PATH:-}
       PORT: ${PORT:-9000}
