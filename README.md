@@ -37,10 +37,12 @@ Variabili specifiche del compose:
 OAUTH_SERVER_IMAGE=docker.io/andpra70/oauth-server:latest
 OAUTH_SERVER_RESTART=unless-stopped
 OAUTH_SERVER_PORT=9000
-OAUTH_SERVER_DATA_DIR=./data/oauth
+OAUTH_SERVER_DATA_VOLUME=oauth-server-data
 OAUTH_SERVER_UID=1000
 OAUTH_SERVER_GID=1000
 ```
+
+Il dato persistente di default usa un volume Docker nominato. In questo modo il contenuto seed copiato in `data/oauth` dentro l'immagine viene inizializzato correttamente nel volume al primo avvio, senza bind mount e senza problemi di permessi host.
 
 UI integrata nello stesso container:
 

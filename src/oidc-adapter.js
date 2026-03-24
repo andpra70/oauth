@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 
 const storePath = 'data/oauth/oidc-store.json';
+const storeSeedPath = 'bootstrap-data/oauth/oidc-store.json';
 
 const grantable = new Set([
   'AccessToken',
@@ -65,11 +66,16 @@ function cleanupExpired(store) {
 }
 
 export function ensureOidcStore() {
+  if (!existsSync(storePath)) {
+    mkdirSync('data/oauth', { recursive: true });
+    if (existsSync(storeSeedPath)) {
+      copyFileSync(storeSeedPath, storePath);
+    } else {
+      saveStore(defaultStore());
+    }
+  }
   const store = loadStore();
   cleanupExpired(store);
-  if (!existsSync(storePath)) {
-    saveStore(store);
-  }
 }
 
 export class JsonAdapter {

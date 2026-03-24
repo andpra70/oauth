@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import argon2 from 'argon2';
 import speakeasy from 'speakeasy';
 
 const dbPath = 'data/oauth/db.json';
+const dbSeedPath = 'bootstrap-data/oauth/db.json';
 
 function normalizeBasePath(value) {
   const raw = String(value || '').trim();
@@ -90,6 +91,11 @@ function buildUniqueUsername(state, preferred) {
 
 export function ensureSchema() {
   if (!existsSync(dbPath)) {
+    mkdirSync('data/oauth', { recursive: true });
+    if (existsSync(dbSeedPath)) {
+      copyFileSync(dbSeedPath, dbPath);
+      return;
+    }
     saveState(defaultState());
     return;
   }
