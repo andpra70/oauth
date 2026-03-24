@@ -1,6 +1,6 @@
+import { appPath, defaultIssuer, issuerEndpoint, resolveBrowserUrl } from './api.js';
+
 const storageKey = 'oauth-console.pkce';
-const appConfig = window.__APP_CONFIG__ || {};
-const baseUrl = new URL(appConfig.baseHref || document.baseURI, window.location.origin);
 
 const el = {
   issuer: document.querySelector('#issuer'),
@@ -20,26 +20,6 @@ const el = {
   meOutput: document.querySelector('#meOutput'),
 };
 
-function appUrl(path = '') {
-  return new URL(String(path).replace(/^\/+/, ''), baseUrl).toString();
-}
-
-function appPath(path = '') {
-  return new URL(String(path).replace(/^\/+/, ''), baseUrl).pathname;
-}
-
-function resolveBrowserUrl(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return raw;
-  if (raw.startsWith('/')) return new URL(raw, window.location.origin).toString();
-  return new URL(raw, baseUrl).toString();
-}
-
-function issuerEndpoint(issuer, path) {
-  return new URL(String(path).replace(/^\/+/, ''), `${String(issuer || '').replace(/\/+$/, '')}/`).toString();
-}
-
 function setStatus(message, type = 'info') {
   el.status.textContent = message;
   el.status.classList.toggle('error', type === 'error');
@@ -47,7 +27,7 @@ function setStatus(message, type = 'info') {
 
 function getDefaults() {
   return {
-    issuer: new URL('.', baseUrl).toString().replace(/\/$/, ''),
+    issuer: defaultIssuer(),
     clientId: 'fileserver-web',
     redirectUri: appPath('app/callback'),
     scope: 'openid profile email offline_access',
