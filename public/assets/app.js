@@ -1,4 +1,6 @@
 const storageKey = 'oauth-console.pkce';
+const appConfig = window.__APP_CONFIG__ || {};
+const baseUrl = new URL(appConfig.baseHref || document.baseURI, window.location.origin);
 
 const el = {
   issuer: document.querySelector('#issuer'),
@@ -18,17 +20,28 @@ const el = {
   meOutput: document.querySelector('#meOutput'),
 };
 
+function appUrl(path = '') {
+  return new URL(String(path).replace(/^\/+/, ''), baseUrl).toString();
+}
+
+function appPath(path = '') {
+  return new URL(String(path).replace(/^\/+/, ''), baseUrl).pathname;
+}
+
+function issuerEndpoint(issuer, path) {
+  return new URL(String(path).replace(/^\/+/, ''), `${String(issuer || '').replace(/\/+$/, '')}/`).toString();
+}
+
 function setStatus(message, type = 'info') {
   el.status.textContent = message;
   el.status.classList.toggle('error', type === 'error');
 }
 
 function getDefaults() {
-  const origin = window.location.origin;
   return {
-    issuer: origin,
+    issuer: appConfig.issuer || new URL('.', baseUrl).toString().replace(/\/$/, ''),
     clientId: 'fileserver-web',
-    redirectUri: `${origin}/app/callback`,
+    redirectUri: appUrl('app/callback'),
     scope: 'openid profile email offline_access',
     username: 'admin',
     setupToken: '',
@@ -92,7 +105,7 @@ async function startAuthorization() {
     const state = randomString(24);
     sessionStorage.setItem(storageKey, JSON.stringify({ verifier, state, config }));
 
-    const url = new URL(`${config.issuer}/auth`);
+    const url = new URL(issuerEndpoint(config.issuer, 'auth'));
     url.searchParams.set('client_id', config.clientId);
     url.searchParams.set('redirect_uri', config.redirectUri);
     url.searchParams.set('response_type', 'code');
@@ -131,7 +144,7 @@ async function exchangeCode(code, state) {
     code_verifier: saved.verifier,
   });
 
-  const response = await fetch(`${saved.config.issuer}/token`, {
+  const response = await fetch(issuerEndpoint(saved.config.issuer, 'token'), {
     method: 'POST',
     headers: {
       'content-type': 'application/x-www-form-urlencoded',
@@ -150,11 +163,11 @@ async function exchangeCode(code, state) {
   }
 
   setStatus('Autenticazione completata. Token ottenuti con successo.');
-  window.history.replaceState({}, document.title, '/app');
+  window.history.replaceState({}, document.title, appPath('app'));
 }
 
 async function loadUserInfo(issuer, accessToken) {
-  const response = await fetch(`${issuer}/me`, {
+  const response = await fetch(issuerEndpoint(issuer, 'me'), {
     headers: {
       authorization: `Bearer ${accessToken}`,
     },
@@ -177,7 +190,7 @@ async function loadQr() {
 
   el.loadQr.disabled = true;
   try {
-    const url = new URL(`${config.issuer}/setup/2fa-qr/${encodeURIComponent(config.username)}.json`);
+    const url = new URL(issuerEndpoint(config.issuer, `setup/2fa-qr/${encodeURIComponent(config.username)}.json`));
     url.searchParams.set('token', config.setupToken);
 
     const response = await fetch(url);
@@ -208,9 +221,9 @@ function clearState() {
   el.otpauth.textContent = 'Nessun QR caricato.';
   setStatus('Pulizia sessione in corso...');
 
-  const logoutUrl = new URL(`${config.issuer || window.location.origin}/session/end`);
+  const logoutUrl = new URL(issuerEndpoint(config.issuer || getDefaults().issuer, 'session/end'));
   logoutUrl.searchParams.set('client_id', config.clientId || 'fileserver-web');
-  logoutUrl.searchParams.set('post_logout_redirect_uri', `${window.location.origin}/app`);
+  logoutUrl.searchParams.set('post_logout_redirect_uri', appUrl('app'));
   logoutUrl.searchParams.set('state', 'session-cleared');
   window.location.assign(logoutUrl);
 }
@@ -219,7 +232,7 @@ async function handleCallback() {
   const params = new URLSearchParams(window.location.search);
   if (params.get('state') === 'session-cleared' && !params.get('code') && !params.get('error')) {
     setStatus('Sessione locale e sessione OIDC pulite.');
-    window.history.replaceState({}, document.title, '/app');
+    window.history.replaceState({}, document.title, appPath('app'));
     return;
   }
 

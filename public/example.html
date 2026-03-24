@@ -227,7 +227,7 @@
         legge <code>/me</code> e permette di chiudere la sessione. Nella schermata server-side di login
         puoi usare credenziali locali, <strong>Accedi con Google</strong> oppure <strong>Registrati con Google</strong>.
       </p>
-      <p class="muted">Console completa: <a href="/app">/app</a></p>
+      <p class="muted">Console completa: <a href="app">/app</a></p>
     </section>
 
     <section class="grid">
@@ -295,6 +295,8 @@
 
   <script>
     const storageKey = 'oauth-example';
+    const appConfig = window.__APP_CONFIG__ || {};
+    const baseUrl = new URL(appConfig.baseHref || document.baseURI, window.location.origin);
 
     const el = {
       issuer: document.getElementById('issuer'),
@@ -309,12 +311,23 @@
       me: document.getElementById('me')
     };
 
+    function appUrl(path = '') {
+      return new URL(String(path).replace(/^\/+/, ''), baseUrl).toString();
+    }
+
+    function appPath(path = '') {
+      return new URL(String(path).replace(/^\/+/, ''), baseUrl).pathname;
+    }
+
+    function issuerEndpoint(issuer, path) {
+      return new URL(String(path).replace(/^\/+/, ''), String(issuer).replace(/\/+$/, '') + '/').toString();
+    }
+
     function defaults() {
-      const origin = window.location.origin;
       return {
-        issuer: origin,
+        issuer: appConfig.issuer || new URL('.', baseUrl).toString().replace(/\/$/, ''),
         clientId: 'fileserver-web',
-        redirectUri: origin + '/example/callback',
+        redirectUri: appUrl('example/callback'),
         scope: 'openid profile email offline_access'
       };
     }
@@ -380,7 +393,7 @@
 
         saveSession({ verifier, state, config });
 
-        const url = new URL(config.issuer + '/auth');
+        const url = new URL(issuerEndpoint(config.issuer, 'auth'));
         url.searchParams.set('client_id', config.clientId);
         url.searchParams.set('redirect_uri', config.redirectUri);
         url.searchParams.set('response_type', 'code');
@@ -399,7 +412,7 @@
     }
 
     async function loadUserInfo(issuer, accessToken) {
-      const response = await fetch(issuer + '/me', {
+      const response = await fetch(issuerEndpoint(issuer, 'me'), {
         headers: {
           authorization: 'Bearer ' + accessToken
         }
@@ -430,7 +443,7 @@
         code_verifier: saved.verifier
       });
 
-      const response = await fetch(saved.config.issuer + '/token', {
+      const response = await fetch(issuerEndpoint(saved.config.issuer, 'token'), {
         method: 'POST',
         headers: {
           'content-type': 'application/x-www-form-urlencoded'
@@ -478,9 +491,9 @@
       el.me.textContent = 'Nessun profilo caricato.';
       setStatus('Reset locale completato. Chiusura sessione OIDC in corso...');
 
-      const url = new URL((config.issuer || window.location.origin) + '/session/end');
+      const url = new URL(issuerEndpoint(config.issuer || defaults().issuer, 'session/end'));
       url.searchParams.set('client_id', config.clientId || 'fileserver-web');
-      url.searchParams.set('post_logout_redirect_uri', window.location.origin + '/example');
+      url.searchParams.set('post_logout_redirect_uri', appUrl('example'));
       url.searchParams.set('state', 'example-session-cleared');
       window.location.assign(url.toString());
     }
@@ -490,7 +503,7 @@
 
       if (params.get('state') === 'example-session-cleared' && !params.get('code') && !params.get('error')) {
         setStatus('Sessione locale e sessione OIDC pulite.');
-        window.history.replaceState({}, document.title, '/example');
+        window.history.replaceState({}, document.title, appPath('example'));
         return;
       }
 
@@ -509,7 +522,7 @@
       try {
         await exchangeCode(code, state);
         setStatus('Flow completato. Token e profilo caricati.');
-        window.history.replaceState({}, document.title, '/example');
+        window.history.replaceState({}, document.title, appPath('example'));
       } catch (error) {
         setStatus(error.message || 'Errore durante il callback.', true);
       }

@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -20,12 +20,41 @@ const publicDir = join(__dirname, '..', 'public');
 const app = express();
 const port = Number(process.env.PORT || 9000);
 const issuer = process.env.ISSUER || `http://localhost:${port}`;
+const issuerUrl = new URL(issuer);
 const cookieKeys = (process.env.COOKIE_KEYS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const trustProxy = String(process.env.TRUST_PROXY || 'false').toLowerCase() === 'true';
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:9000,http://localhost:8080,http://localhost')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+const indexTemplate = readFileSync(join(publicDir, 'index.html'), 'utf8');
+const exampleTemplate = readFileSync(join(publicDir, 'example.html'), 'utf8');
+
+function normalizeBasePath(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw === '/') return '';
+  return `/${raw.replace(/^\/+|\/+$/g, '')}`;
+}
+
+function resolvePath(base, path = '/') {
+  const normalizedBase = normalizeBasePath(base);
+  const normalizedPath = String(path || '/').startsWith('/') ? String(path || '/') : `/${String(path || '/')}`;
+  return normalizedBase ? `${normalizedBase}${normalizedPath}` : normalizedPath;
+}
+
+function stripBasePath(path, base) {
+  const normalizedPath = String(path || '/').startsWith('/') ? String(path || '/') : `/${String(path || '/')}`;
+  const normalizedBase = normalizeBasePath(base);
+  if (!normalizedBase) return normalizedPath;
+  if (normalizedPath === normalizedBase) return '/';
+  if (normalizedPath.startsWith(`${normalizedBase}/`)) {
+    return normalizedPath.slice(normalizedBase.length);
+  }
+  return normalizedPath;
+}
+
+const basePath = normalizeBasePath(process.env.BASE_PATH || issuerUrl.pathname);
+const baseHref = basePath ? `${basePath}/` : '/';
 
 function normalizeOrigin(value) {
   try {
@@ -62,15 +91,25 @@ const googleLoginStates = new Map();
 
 const googleClientId = process.env.GOOGLE_CLIENT_ID || '';
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
-const googleCallbackPath = process.env.GOOGLE_CALLBACK_PATH || '/auth/google/callback';
-const googleCallbackUrl = process.env.GOOGLE_CALLBACK_URL || new URL(googleCallbackPath, issuer).toString();
+const defaultGoogleCallbackPath = resolvePath(basePath, '/auth/google/callback');
+const googleCallbackPath = process.env.GOOGLE_CALLBACK_PATH || defaultGoogleCallbackPath;
+const googleCallbackRoutePath = stripBasePath(googleCallbackPath, basePath);
+const googleCallbackUrl = process.env.GOOGLE_CALLBACK_URL || new URL(googleCallbackPath, `${issuerUrl.origin}/`).toString();
 const googleEnabled = Boolean(googleClientId && googleClientSecret);
+
+function renderTemplate(template) {
+  const appConfig = JSON.stringify({ basePath, baseHref, issuer }).replace(/</g, '\\u003c');
+  return template.replace(
+    '<head>',
+    `<head>\n  <base href="${baseHref}" />\n  <script>window.__APP_CONFIG__ = ${appConfig};</script>`,
+  );
+}
 
 function getQrSetupUrl() {
   const setupToken = process.env.SETUP_TOKEN || '';
   const adminUser = process.env.ADMIN_USERNAME || 'admin';
   if (!setupToken) return '';
-  return `/setup/2fa-qr/${encodeURIComponent(adminUser)}?token=${encodeURIComponent(setupToken)}`;
+  return resolvePath(basePath, `/setup/2fa-qr/${encodeURIComponent(adminUser)}?token=${encodeURIComponent(setupToken)}`);
 }
 
 async function buildQrSetupPayload(user) {
@@ -119,7 +158,7 @@ function createTotpSetupSession(uid, accountId) {
 
 function getInteractionQrSetupUrl(uid, accountId) {
   const token = createTotpSetupSession(uid, accountId);
-  return `/interaction/${encodeURIComponent(uid)}/2fa-qr?token=${encodeURIComponent(token)}`;
+  return resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/2fa-qr?token=${encodeURIComponent(token)}`);
 }
 
 function getTotpSetupSession(token, uid) {
@@ -134,11 +173,11 @@ function getTotpSetupSession(token, uid) {
 }
 
 function getGoogleLoginUrl(uid) {
-  return `/interaction/${encodeURIComponent(uid)}/login/google`;
+  return resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/login/google`);
 }
 
 function getGoogleRegisterUrl(uid) {
-  return `/interaction/${encodeURIComponent(uid)}/register/google`;
+  return resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/register/google`);
 }
 
 function createGoogleState(uid) {
@@ -250,7 +289,7 @@ function isMissingInteractionSession(error) {
 
 function respondExpiredSession(res) {
   res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.end(renderExpiredSession());
+  res.end(renderExpiredSession({ basePath }));
 }
 
 setInterval(() => {
@@ -307,7 +346,7 @@ const provider = new Provider(issuer, {
   },
   interactions: {
     url(_ctx, interaction) {
-      return `/interaction/${interaction.uid}`;
+      return resolvePath(basePath, `/interaction/${interaction.uid}`);
     },
   },
   clientBasedCORS(_ctx, origin, client) {
@@ -350,22 +389,23 @@ app.use(helmet({
 }));
 
 const formParser = express.urlencoded({ extended: false });
+const web = express.Router();
 
-app.get('/health', (_req, res) => {
+web.get('/health', (_req, res) => {
   res.json({ ok: true, issuer });
 });
 
-app.use('/app/assets', express.static(join(publicDir, 'assets')));
+web.use('/app/assets', express.static(join(publicDir, 'assets')));
 
-app.get(['/', '/app', '/app/callback'], (_req, res) => {
-  res.sendFile(join(publicDir, 'index.html'));
+web.get(['/', '/app', '/app/callback'], (_req, res) => {
+  res.type('html').send(renderTemplate(indexTemplate));
 });
 
-app.get(['/example', '/example/callback'], (_req, res) => {
-  res.sendFile(join(publicDir, 'example.html'));
+web.get(['/example', '/example/callback'], (_req, res) => {
+  res.type('html').send(renderTemplate(exampleTemplate));
 });
 
-app.get('/setup/2fa-qr/:username', async (req, res) => {
+web.get('/setup/2fa-qr/:username', async (req, res) => {
   const setupToken = process.env.SETUP_TOKEN || '';
   const queryToken = String(req.query.token || '');
   const headerToken = req.get('x-setup-token') || '';
@@ -388,7 +428,7 @@ app.get('/setup/2fa-qr/:username', async (req, res) => {
   res.end(`<img alt="qr" src="${payload.dataUrl}" /><p>${payload.otpauthUrl}</p>`);
 });
 
-app.get('/setup/2fa-qr/:username.json', async (req, res) => {
+web.get('/setup/2fa-qr/:username.json', async (req, res) => {
   const setupToken = process.env.SETUP_TOKEN || '';
   const queryToken = String(req.query.token || '');
   const headerToken = req.get('x-setup-token') || '';
@@ -410,7 +450,7 @@ app.get('/setup/2fa-qr/:username.json', async (req, res) => {
   res.json(payload);
 });
 
-app.get('/interaction/:uid/2fa-qr', async (req, res) => {
+web.get('/interaction/:uid/2fa-qr', async (req, res) => {
   const { uid } = req.params;
   const token = String(req.query.token || '');
   const pending = getTotpSetupSession(token, uid);
@@ -428,21 +468,21 @@ app.get('/interaction/:uid/2fa-qr', async (req, res) => {
   res.end(`<img alt="qr" src="${payload.dataUrl}" /><p>${payload.otpauthUrl}</p>`);
 });
 
-app.get('/interaction/:uid', async (req, res, next) => {
+web.get('/interaction/:uid', async (req, res, next) => {
   try {
     const details = await provider.interactionDetails(req, res);
     const { uid, prompt, params } = details;
 
     if (prompt.name === 'login') {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({ uid, googleLoginUrl: getGoogleLoginUrl(uid), googleRegisterUrl: getGoogleRegisterUrl(uid) }));
+      res.end(renderLogin({ basePath, uid, googleLoginUrl: getGoogleLoginUrl(uid), googleRegisterUrl: getGoogleRegisterUrl(uid) }));
       return;
     }
 
     if (prompt.name === 'consent') {
       const client = await provider.Client.find(params.client_id);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderConsent({ uid, clientName: client?.clientName || params.client_id, scope: params.scope }));
+      res.end(renderConsent({ basePath, uid, clientName: client?.clientName || params.client_id, scope: params.scope }));
       return;
     }
 
@@ -452,7 +492,7 @@ app.get('/interaction/:uid', async (req, res, next) => {
   }
 });
 
-app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, next) => {
+web.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, next) => {
   try {
     const { uid } = req.params;
     const { username = '', password = '', otp = '', challenge = '' } = req.body;
@@ -462,6 +502,7 @@ app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
       if (!pending) {
         res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
         res.end(renderLogin({
+          basePath,
           uid,
           error: 'Session expired. Sign in again.',
           googleLoginUrl: getGoogleLoginUrl(uid),
@@ -474,6 +515,7 @@ app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
       if (!resolvedUser) {
         res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
         res.end(renderLogin({
+          basePath,
           uid,
           error: 'Unknown account. Sign in again.',
           googleLoginUrl: getGoogleLoginUrl(uid),
@@ -486,6 +528,7 @@ app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
         const retryChallenge = createTotpChallenge(uid, resolvedUser.id);
         res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
         res.end(renderLogin({
+          basePath,
           uid,
           username: resolvedUser.username,
           otp,
@@ -512,6 +555,7 @@ app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
     if (!user || !user.password_hash) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(renderLogin({
+        basePath,
         uid,
         username,
         error: 'Invalid credentials',
@@ -527,6 +571,7 @@ app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
     if (!passwordOk) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(renderLogin({
+        basePath,
         uid,
         username,
         error: 'Invalid credentials',
@@ -540,6 +585,7 @@ app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
       if (!verifyTotpToken(user, otp)) {
         res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
         res.end(renderLogin({
+          basePath,
           uid,
           username,
           error: otp ? 'Invalid verification code' : 'Authenticator code is required',
@@ -568,10 +614,10 @@ app.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
   }
 });
 
-app.get('/interaction/:uid/login/google', startGoogleAuth);
-app.get('/interaction/:uid/register/google', startGoogleAuth);
+web.get('/interaction/:uid/login/google', startGoogleAuth);
+web.get('/interaction/:uid/register/google', startGoogleAuth);
 
-app.get(googleCallbackPath, async (req, res, next) => {
+web.get(googleCallbackRoutePath, async (req, res, next) => {
   const state = String(req.query.state || '');
   const code = String(req.query.code || '');
   const error = String(req.query.error || '');
@@ -592,6 +638,7 @@ app.get(googleCallbackPath, async (req, res, next) => {
     if (error) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(renderLogin({
+        basePath,
         uid,
         error: 'Google login was cancelled',
         googleLoginUrl: getGoogleLoginUrl(uid),
@@ -603,6 +650,7 @@ app.get(googleCallbackPath, async (req, res, next) => {
     if (!code) {
       res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(renderLogin({
+        basePath,
         uid,
         error: 'Missing Google authorization code',
         googleLoginUrl: getGoogleLoginUrl(uid),
@@ -618,6 +666,7 @@ app.get(googleCallbackPath, async (req, res, next) => {
     const challenge = createTotpChallenge(uid, user.id);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.end(renderLogin({
+      basePath,
       uid,
       username: user.username,
       googleChallenge: challenge,
@@ -633,6 +682,7 @@ app.get(googleCallbackPath, async (req, res, next) => {
 
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(renderLogin({
+        basePath,
         uid,
         error: 'Google login failed',
         googleLoginUrl: getGoogleLoginUrl(uid),
@@ -645,7 +695,7 @@ app.get(googleCallbackPath, async (req, res, next) => {
   }
 });
 
-app.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, next) => {
+web.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, next) => {
   try {
     const { uid } = req.params;
     const { challenge = '', otp = '' } = req.body;
@@ -653,7 +703,7 @@ app.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, nex
     const pending = consumeTotpChallenge(challenge, uid);
     if (!pending) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({ uid, error: 'Session expired. Sign in again.' }));
+      res.end(renderLogin({ basePath, uid, error: 'Session expired. Sign in again.' }));
       return;
     }
 
@@ -661,7 +711,7 @@ app.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, nex
 
     if (!resolvedUser) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({ uid, error: 'Unknown account. Sign in again.' }));
+      res.end(renderLogin({ basePath, uid, error: 'Unknown account. Sign in again.' }));
       return;
     }
 
@@ -669,6 +719,7 @@ app.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, nex
       const retryChallenge = createTotpChallenge(uid, resolvedUser.id);
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(renderLogin({
+        basePath,
         uid,
         username: resolvedUser.username,
         otp,
@@ -697,7 +748,7 @@ app.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, nex
   }
 });
 
-app.post('/interaction/:uid/confirm', formParser, async (req, res, next) => {
+web.post('/interaction/:uid/confirm', formParser, async (req, res, next) => {
   try {
     const interactionDetails = await provider.interactionDetails(req, res);
     const { prompt: { details } } = interactionDetails;
@@ -734,7 +785,7 @@ app.post('/interaction/:uid/confirm', formParser, async (req, res, next) => {
   }
 });
 
-app.post('/interaction/:uid/abort', formParser, async (req, res, next) => {
+web.post('/interaction/:uid/abort', formParser, async (req, res, next) => {
   try {
     const result = {
       error: 'access_denied',
@@ -751,7 +802,13 @@ app.post('/interaction/:uid/abort', formParser, async (req, res, next) => {
   }
 });
 
-app.use(provider.callback());
+web.use(provider.callback());
+
+if (basePath) {
+  app.use(basePath, web);
+} else {
+  app.use(web);
+}
 
 app.use((err, _req, res, _next) => {
   console.error(err);

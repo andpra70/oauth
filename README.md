@@ -21,7 +21,23 @@ npm run dev
 ## Avvio con Docker
 
 ```bash
+cp .env.example .env
 docker compose up --build
+```
+
+`docker-compose.yml` legge la configurazione dal file `./.env`, inclusi secret applicativi come `COOKIE_KEYS`, `ADMIN_PASSWORD`, `DEFAULT_CLIENT_SECRET`, `SETUP_TOKEN` e gli eventuali secret Google.
+
+I path del compose restano relativi alla directory che contiene `docker-compose.yml`. Se vuoi pubblicare il provider sotto un subcontext, imposta `ISSUER` con il path finale e opzionalmente `BASE_PATH`. Esempio: `ISSUER=https://auth.example.com/oauth` e `BASE_PATH=/oauth`.
+
+Se `DEFAULT_CLIENT_REDIRECT_URIS`, `DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS`, `GOOGLE_CALLBACK_PATH` e `GOOGLE_CALLBACK_URL` non sono valorizzate, l'app li deriva automaticamente da `ISSUER` e `BASE_PATH`.
+
+Variabili specifiche del compose:
+
+```bash
+OAUTH_SERVER_IMAGE=docker.io/andpra70/oauth-server:latest
+OAUTH_SERVER_RESTART=unless-stopped
+OAUTH_SERVER_PORT=9000
+OAUTH_SERVER_DATA_DIR=./data/oauth
 ```
 
 UI integrata nello stesso container:
