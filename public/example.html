@@ -247,6 +247,10 @@
             <input id="redirectUri" />
           </div>
           <div class="field full">
+            <label for="callbackUrl">Interaction callback URL</label>
+            <input id="callbackUrl" placeholder="http://localhost:8080/oauth/callback-state" />
+          </div>
+          <div class="field full">
             <label for="scope">Scope</label>
             <input id="scope" />
           </div>
@@ -302,6 +306,7 @@
       issuer: document.getElementById('issuer'),
       clientId: document.getElementById('clientId'),
       redirectUri: document.getElementById('redirectUri'),
+      callbackUrl: document.getElementById('callbackUrl'),
       scope: document.getElementById('scope'),
       startAuth: document.getElementById('startAuth'),
       loadProfile: document.getElementById('loadProfile'),
@@ -336,6 +341,7 @@
         issuer: new URL('.', baseUrl).toString().replace(/\/$/, ''),
         clientId: 'fileserver-web',
         redirectUri: appPath('example/callback'),
+        callbackUrl: '',
         scope: 'openid profile email offline_access'
       };
     }
@@ -349,6 +355,7 @@
       el.issuer.value = config.issuer;
       el.clientId.value = config.clientId;
       el.redirectUri.value = config.redirectUri;
+      el.callbackUrl.value = config.callbackUrl || '';
       el.scope.value = config.scope;
     }
 
@@ -357,6 +364,7 @@
         issuer: el.issuer.value.trim().replace(/\/+$/, ''),
         clientId: el.clientId.value.trim(),
         redirectUri: el.redirectUri.value.trim(),
+        callbackUrl: el.callbackUrl.value.trim(),
         scope: el.scope.value.trim()
       };
     }
@@ -407,6 +415,9 @@
         url.searchParams.set('redirect_uri', redirectUri);
         url.searchParams.set('response_type', 'code');
         url.searchParams.set('scope', config.scope || 'openid');
+        if (config.callbackUrl) {
+          url.searchParams.set('callbackUrl', resolveBrowserUrl(config.callbackUrl));
+        }
         url.searchParams.set('code_challenge', challenge);
         url.searchParams.set('code_challenge_method', 'S256');
         url.searchParams.set('state', state);

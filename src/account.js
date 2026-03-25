@@ -8,7 +8,10 @@ export async function findAccount(_ctx, id) {
     accountId: user.id,
     async claims(_use, scope) {
       const claims = { sub: user.id };
-      if (scope.includes('profile')) claims.preferred_username = user.username;
+      if (scope.includes('profile')) {
+        claims.preferred_username = user.username;
+        if (user.picture) claims.picture = user.picture;
+      }
       if (scope.includes('email') && user.email) claims.email = user.email;
       return claims;
     },
