@@ -1,6 +1,6 @@
-# OAuth2/OIDC Server (with 2FA)
+# OAuth2/OIDC Server (with optional 2FA)
 
-Authorization server separato basato su `oidc-provider` con login username/password + TOTP oppure Google Sign-In.
+Authorization server separato basato su `oidc-provider` con login username/password, 2FA TOTP opzionale e Google Sign-In.
 
 ## Avvio locale
 
@@ -31,6 +31,8 @@ I path del compose restano relativi alla directory che contiene `docker-compose.
 
 Se `DEFAULT_CLIENT_REDIRECT_URIS`, `DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS`, `GOOGLE_CALLBACK_PATH` e `GOOGLE_CALLBACK_URL` non sono valorizzate, l'app li deriva automaticamente da `ISSUER` e `BASE_PATH`.
 
+`TWO_FACTOR_ENABLED`, `CONSENT_ENABLED`, `GOOGLE_OAUTH_ENABLED` e `CONFIRM_LOGOUT` impostano lo stato iniziale del server all'avvio. Per cambiare i flag a caldo senza riavviare usa `POST /setup/runtime-config`.
+
 Variabili specifiche del compose:
 
 ```bash
@@ -54,6 +56,18 @@ Example minimale:
 http://localhost:9000/example
 ```
 
+Example auto-login:
+
+```text
+http://localhost:9000/example2
+```
+
+Example React:
+
+```text
+http://localhost:9000/example3
+```
+
 Script disponibili:
 
 ```bash
@@ -71,9 +85,15 @@ Endpoint applicativi:
 - `GET /app/callback`
 - `GET /example`
 - `GET /example/callback`
+- `GET /example2`
+- `GET /example2/callback`
+- `GET /example3`
+- `GET /example3/callback`
 - `GET /health`
 - `GET /setup/2fa-qr/:username`
 - `GET /setup/2fa-qr/:username.json`
+- `GET /setup/runtime-config`
+- `POST /setup/runtime-config`
 
 Endpoint OIDC/OAuth2:
 
@@ -99,7 +119,7 @@ Endpoint interni di interaction usati dal login browser-based:
 
 ## Sequenza di autenticazione
 
-Flow supportato: Authorization Code + PKCE `S256`, con login username/password, 2FA TOTP, Google Sign-In e consenso.
+Flow supportato: Authorization Code + PKCE `S256`, con login username/password, Google Sign-In, consenso e 2FA TOTP opzionale.
 
 1. Recupera la configurazione OIDC:
 
@@ -115,9 +135,9 @@ curl http://localhost:9000/.well-known/openid-configuration
 
 5. Invia username e password a `POST /interaction/:uid/login`, oppure usa `Accedi con Google` o `Registrati con Google`.
 
-6. Se fai login locale e l'utente ha 2FA attivo, il server mostra il form TOTP e devi inviare il codice a `POST /interaction/:uid/2fa`.
+6. Se `TWO_FACTOR_ENABLED=true` e l'utente ha 2FA attiva, il server richiede il codice TOTP. Se `TWO_FACTOR_ENABLED=false`, il login locale e il login Google completano il flow senza OTP.
 
-7. Se richiesto, il server mostra il consenso e devi confermare con `POST /interaction/:uid/confirm`.
+7. Se `CONSENT_ENABLED=true` e il client richiede consenso, il server mostra `Authorize application` e devi confermare con `POST /interaction/:uid/confirm`. Se `CONSENT_ENABLED=false`, il consenso viene accettato automaticamente.
 
 8. Al termine del login il browser viene reindirizzato a `/app/callback` con il parametro `code`.
 
@@ -152,13 +172,102 @@ curl http://localhost:9000/me \
 
 ## Setup 2FA
 
-Per bootstrap dell'utente admin puoi ottenere il QR code TOTP con la UI su `/app` oppure con:
+Se `TWO_FACTOR_ENABLED=true`, per bootstrap dell'utente admin puoi ottenere il QR code TOTP con la UI su `/app` oppure con:
 
 ```bash
 curl "http://localhost:9000/setup/2fa-qr/admin?token=replace-with-bootstrap-token"
 ```
 
 In alternativa puoi passare il token nell'header `x-setup-token`.
+
+Per leggere lo stato runtime corrente:
+
+```bash
+curl "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token"
+```
+
+Per disabilitare la 2FA a caldo:
+
+```bash
+curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token" \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  --data 'twoFactorEnabled=false'
+```
+
+Per riabilitare la 2FA a caldo:
+
+```bash
+curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token" \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  --data 'twoFactorEnabled=true'
+```
+
+Per disabilitare il consenso `Authorize application` a caldo:
+
+```bash
+curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token" \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  --data 'consentEnabled=false'
+```
+
+Per riabilitare il consenso a caldo:
+
+```bash
+curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token" \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  --data 'consentEnabled=true'
+```
+
+Per disabilitare Google OAuth a caldo:
+
+```bash
+curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token" \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  --data 'googleOAuthEnabled=false'
+```
+
+Per riabilitare Google OAuth a caldo:
+
+```bash
+curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token" \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  --data 'googleOAuthEnabled=true'
+```
+
+Per disabilitare la conferma su `session/end` e fare logout diretto:
+
+```bash
+curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token" \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  --data 'confirmLogout=false'
+```
+
+Per riabilitare la conferma logout:
+
+```bash
+curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token" \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  --data 'confirmLogout=true'
+```
+
+## Callback di interaction
+
+Puoi passare `callbackUrl` nella richiesta `/auth`. Il valore deve appartenere a uno degli origin consentiti in `ALLOWED_ORIGINS`.
+
+Esempio:
+
+```text
+http://localhost:9000/auth?client_id=fileserver-web&redirect_uri=http%3A%2F%2Flocalhost%3A9000%2Fapp%2Fcallback&response_type=code&scope=openid%20profile%20email%20offline_access&callbackUrl=http%3A%2F%2Flocalhost%3A8080%2Foauth%2Fstate&code_challenge=...&code_challenge_method=S256&state=...
+```
+
+Quando il login è pronto, oppure quando il consenso viene approvato o negato, il browser viene rediretto a `callbackUrl` con questi parametri query:
+
+- `stage`
+- `status`
+- `uid`
+- `continueUrl`
+
+`continueUrl` punta a una route del provider che completa davvero la interaction OIDC. Il flusso esterno può fare il proprio lavoro e poi redirigere il browser su `continueUrl`.
 
 ## Setup Google Login
 
@@ -231,7 +340,7 @@ Il login username/password resta invariato per gli utenti locali già presenti n
 ## Sicurezza implementata
 
 - Password hashate con Argon2id
-- 2FA TOTP (`speakeasy`)
+- 2FA TOTP opzionale (`speakeasy`)
 - PKCE `S256` obbligatorio
 - Helmet headers
 - Rate limit login/2FA
@@ -247,5 +356,5 @@ Il login username/password resta invariato per gli utenti locali già presenti n
 - In Docker il volume host `./data/oauth` viene montato in `/app/data`
 - Le variabili runtime sono caricate da `.env`
 - Il client seedato di default usa `client_id=fileserver-web`
-- Il redirect URI seedato di default è `http://localhost:9000/app/callback`
+- I redirect URI seedati di default includono `http://localhost:9000/app/callback`, `http://localhost:9000/example/callback`, `http://localhost:9000/example2/callback` e `http://localhost:9000/example3/callback`
 - Se `DEFAULT_CLIENT_AUTH_METHOD=none`, lo scambio code -> token usa PKCE senza `client_secret`

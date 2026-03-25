@@ -17,10 +17,7 @@ function renderQrSection(qrSetupUrl) {
   if (!qrSetupUrl) return '';
 
   return `
-    <div class="qr-panel">
-      <p class="hint">TOTP setup QR</p>
-      <iframe class="qr-frame" src="${escapeHtml(qrSetupUrl)}" title="TOTP QR setup"></iframe>
-    </div>
+    <p class="hint"><a href="${escapeHtml(qrSetupUrl)}" target="_blank" rel="noopener noreferrer">Open TOTP setup QR</a></p>
   `;
 }
 
@@ -45,7 +42,6 @@ function page(title, body) {
     .secondary { background:#374151; }
     .auth-grid { display:grid; grid-template-columns: 1fr; gap:16px; align-items:start; }
     .qr-panel { border:1px solid #334155; border-radius:12px; padding:12px; background:#0b1220; }
-    .qr-frame { width:100%; min-height:320px; border:1px solid #334155; border-radius:12px; background:white; margin-top:8px; }
     @media (min-width: 860px) {
       .box { max-width: 920px; margin: 0 auto; }
       .auth-grid.has-qr { grid-template-columns: minmax(0, 1fr) 280px; }
@@ -61,6 +57,7 @@ function page(title, body) {
 export function renderLogin({
   basePath = '',
   uid,
+  twoFactorEnabled = true,
   error = '',
   username = '',
   otp = '',
@@ -71,12 +68,15 @@ export function renderLogin({
   googleAccountLabel = '',
 }) {
   const isGoogleTotp = Boolean(googleChallenge);
-  const hasQr = Boolean(qrSetupUrl);
+  const showOtpField = twoFactorEnabled;
+  const loginHint = showOtpField
+    ? 'Use your username, password and Authenticator code in one step. Google login registers or updates the user and then returns here for TOTP verification.'
+    : 'Use your username and password to sign in. Google login registers or updates the user and completes the session without TOTP.';
 
   return page('Sign in', `
     <h2>Sign in</h2>
-    <p class="hint">Use your username, password and Authenticator code in one step. Google login registers or updates the user and then returns here for TOTP verification.</p>
-    <div class="auth-grid ${hasQr ? 'has-qr' : ''}">
+    <p class="hint">${escapeHtml(loginHint)}</p>
+    <div class="auth-grid">
       <form method="post" action="${escapeHtml(resolvePath(basePath, `/interaction/${uid}/login`))}">
         ${isGoogleTotp ? `<input type="hidden" name="challenge" value="${escapeHtml(googleChallenge)}" />` : ''}
         ${isGoogleTotp
@@ -88,12 +88,12 @@ export function renderLogin({
         <label>Password
           <input name="password" type="password" autocomplete="current-password" required />
         </label>`}
-        <label>Authenticator code
+        ${showOtpField ? `<label>Authenticator code
           <input name="otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" ${isGoogleTotp ? 'required' : ''} value="${escapeHtml(otp)}" />
-        </label>
+        </label>` : ''}
         <button type="submit">${isGoogleTotp ? 'Verify and sign in' : 'Continue'}</button>
+        ${renderQrSection(qrSetupUrl)}
       </form>
-      ${renderQrSection(qrSetupUrl)}
     </div>
     ${!isGoogleTotp && (googleLoginUrl || googleRegisterUrl) ? '<p class="separator">Google OAuth</p>' : ''}
     ${!isGoogleTotp ? `<div class="actions">
@@ -131,6 +131,67 @@ export function renderExpiredSession({ basePath = '' } = {}) {
       <form method="get" action="${escapeHtml(resolvePath(basePath, '/'))}">
         <button class="secondary" type="submit">Go to home</button>
       </form>
+    </div>
+  `);
+}
+
+export function renderLogout({ basePath = '', host = '', form = '' } = {}) {
+  return page('Sign out', `
+    <h2>Sign out</h2>
+    <p class="hint">You are about to close the current authorization session for <strong>${escapeHtml(host || 'this provider')}</strong>.</p>
+    <div class="actions">
+      ${form}
+      <button autofocus type="submit" form="op.logoutForm" value="yes" name="logout">Yes, sign me out</button>
+      <button class="secondary" type="submit" form="op.logoutForm">No, stay signed in</button>
+    </div>
+  `);
+}
+
+export function renderLogoutSuccess({ basePath = '', clientName = '' } = {}) {
+  return page('Signed out', `
+    <h2>Signed out</h2>
+    <p class="hint">Your session ${clientName ? `for <strong>${escapeHtml(clientName)}</strong> ` : ''}has been closed successfully.</p>
+    <div class="actions">
+      <form method="get" action="${escapeHtml(resolvePath(basePath, '/app'))}">
+        <button type="submit">Open OAuth Console</button>
+      </form>
+      <form method="get" action="${escapeHtml(resolvePath(basePath, '/example3'))}">
+        <button class="secondary" type="submit">Open React Example</button>
+      </form>
+    </div>
+  `);
+}
+
+export function renderLogoutAutoSubmit({ form = '' } = {}) {
+  return page('Signing out', `
+    <h2>Signing out</h2>
+    <p class="hint">Your session is being closed automatically.</p>
+    ${form}
+    <div class="actions">
+      <button autofocus type="submit" form="op.logoutForm" value="yes" name="logout">Continue</button>
+    </div>
+    <script>
+      const form = document.getElementById('op.logoutForm');
+      if (form) {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'logout';
+        input.value = 'yes';
+        form.appendChild(input);
+        form.submit();
+      }
+    </script>
+  `);
+}
+
+export function renderTotpQrSetup({ username = '', otpauthUrl = '', dataUrl = '' } = {}) {
+  return page('TOTP setup QR', `
+    <h2>TOTP setup QR</h2>
+    <p class="hint">Scan this QR code with your authenticator app${username ? ` for <strong>${escapeHtml(username)}</strong>` : ''}.</p>
+    <div class="qr-panel">
+      <img src="${escapeHtml(dataUrl)}" alt="TOTP setup QR" style="width:100%; max-width:280px; display:block; margin:0 auto 12px; border-radius:12px; background:white; padding:12px;" />
+      <p class="hint">If you cannot scan the QR code, use the OTPAuth URL below.</p>
+      <pre style="margin:0; padding:12px; border-radius:12px; background:#111827; color:#e2e8f0; white-space:pre-wrap; word-break:break-word;">${escapeHtml(otpauthUrl)}</pre>
     </div>
   `);
 }

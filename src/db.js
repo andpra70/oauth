@@ -18,12 +18,16 @@ function buildDefaultClientUrls() {
   const baseUrl = new URL(basePath ? `${basePath}/` : '/', issuerUrl.origin);
   const callbackApp = new URL('app/callback', baseUrl).toString();
   const callbackExample = new URL('example/callback', baseUrl).toString();
+  const callbackExample2 = new URL('example2/callback', baseUrl).toString();
+  const callbackExample3 = new URL('example3/callback', baseUrl).toString();
   const postLogoutApp = new URL('app', baseUrl).toString();
   const postLogoutExample = new URL('example', baseUrl).toString();
+  const postLogoutExample2 = new URL('example2', baseUrl).toString();
+  const postLogoutExample3 = new URL('example3', baseUrl).toString();
 
   return {
-    redirectUris: `${callbackApp},${callbackExample}`,
-    postLogoutRedirectUris: `${postLogoutApp},${postLogoutExample}`,
+    redirectUris: `${callbackApp},${callbackExample},${callbackExample2},${callbackExample3}`,
+    postLogoutRedirectUris: `${postLogoutApp},${postLogoutExample},${postLogoutExample2},${postLogoutExample3}`,
   };
 }
 
@@ -202,6 +206,7 @@ export function upsertGoogleUser(profile) {
   const state = loadState();
   const googleSubject = String(profile.sub || '').trim();
   const email = normalizeEmail(profile.email);
+  const picture = String(profile.picture || '').trim() || null;
   if (!googleSubject) {
     throw new Error('Google subject is required');
   }
@@ -216,6 +221,7 @@ export function upsertGoogleUser(profile) {
     existing.google_subject = googleSubject;
     existing.auth_provider = 'google';
     existing.email = email || existing.email || null;
+    existing.picture = picture || existing.picture || null;
     if (!existing.username) {
       existing.username = buildUniqueUsername(state, profile.email || profile.name || 'google-user');
     }
@@ -233,6 +239,7 @@ export function upsertGoogleUser(profile) {
     id: newId('usr'),
     username: buildUniqueUsername(state, profile.email || profile.name || 'google-user'),
     email: email || null,
+    picture,
     auth_provider: 'google',
     google_subject: googleSubject,
     totp_secret: secret.base32,

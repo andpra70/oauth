@@ -6,6 +6,7 @@ const el = {
   issuer: document.querySelector('#issuer'),
   clientId: document.querySelector('#clientId'),
   redirectUri: document.querySelector('#redirectUri'),
+  callbackUrl: document.querySelector('#callbackUrl'),
   scope: document.querySelector('#scope'),
   setupToken: document.querySelector('#setupToken'),
   username: document.querySelector('#username'),
@@ -30,6 +31,7 @@ function getDefaults() {
     issuer: defaultIssuer(),
     clientId: 'fileserver-web',
     redirectUri: appPath('app/callback'),
+    callbackUrl: '',
     scope: 'openid profile email offline_access',
     username: 'admin',
     setupToken: '',
@@ -41,6 +43,7 @@ function readConfig() {
     issuer: el.issuer.value.trim().replace(/\/+$/, ''),
     clientId: el.clientId.value.trim(),
     redirectUri: el.redirectUri.value.trim(),
+    callbackUrl: el.callbackUrl.value.trim(),
     scope: el.scope.value.trim(),
     setupToken: el.setupToken.value.trim(),
     username: el.username.value.trim(),
@@ -51,6 +54,7 @@ function writeConfig(config) {
   el.issuer.value = config.issuer;
   el.clientId.value = config.clientId;
   el.redirectUri.value = config.redirectUri;
+  el.callbackUrl.value = config.callbackUrl || '';
   el.scope.value = config.scope;
   el.setupToken.value = config.setupToken;
   el.username.value = config.username;
@@ -99,6 +103,9 @@ async function startAuthorization() {
     url.searchParams.set('redirect_uri', redirectUri);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('scope', config.scope || 'openid');
+    if (config.callbackUrl) {
+      url.searchParams.set('callbackUrl', resolveBrowserUrl(config.callbackUrl));
+    }
     url.searchParams.set('code_challenge', challenge);
     url.searchParams.set('code_challenge_method', 'S256');
     url.searchParams.set('state', state);
