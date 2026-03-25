@@ -144,7 +144,7 @@ function startLogoutFlow() {
   window.location.assign(url.toString());
 }
 
-const OAuthProfileCard = React.forwardRef(function OAuthProfileCard({ onProfileLoaded }, ref) {
+function OAuthProfileCard({ onProfileLoaded }) {
   const [status, setStatus] = React.useState('Verifica sessione in corso...');
   const [error, setError] = React.useState('');
   const [profile, setProfile] = React.useState(null);
@@ -222,11 +222,19 @@ const OAuthProfileCard = React.forwardRef(function OAuthProfileCard({ onProfileL
     };
   }, [onProfileLoaded]);
 
-  React.useImperativeHandle(ref, () => ({
-    getProfile() {
-      return profile;
-    },
-  }), [profile]);
+  React.useEffect(() => {
+    window.example3ProfileWidget = {
+      getProfile() {
+        return profile;
+      },
+    };
+
+    return () => {
+      if (window.example3ProfileWidget?.getProfile) {
+        delete window.example3ProfileWidget;
+      }
+    };
+  }, [profile]);
 
   async function handleLogin() {
     setBusy(true);
@@ -265,27 +273,19 @@ const OAuthProfileCard = React.forwardRef(function OAuthProfileCard({ onProfileL
       {busy ? <span className="session-pending">...</span> : null}
     </section>
   );
-});
+}
 
 function Example3App() {
   const [profile, setProfile] = React.useState(null);
-  const widgetRef = React.useRef(null);
-
-  function handleReadProfile() {
-    setProfile(widgetRef.current?.getProfile?.() || null);
-  }
 
   return (
     <main className="example3-shell">
       <section className="hero hero-compact">
-        <OAuthProfileCard ref={widgetRef} onProfileLoaded={setProfile} />
+        <OAuthProfileCard onProfileLoaded={setProfile} />
       </section>
 
       <section className="exposed-panel">
         <h2>Profilo esposto dal componente</h2>
-        <div className="exposed-actions">
-          <button className="primary compact" onClick={handleReadProfile}>Leggi profilo dal componente</button>
-        </div>
         <pre>{JSON.stringify(profile, null, 2)}</pre>
       </section>
     </main>

@@ -196,9 +196,27 @@
 </head>
 <body>
   <div id="app"></div>
+  <main class="example3-shell">
+    <section class="exposed-panel">
+      <h2>Profilo letto via script pagina</h2>
+      <div class="exposed-actions">
+        <button id="readProfileButton" class="primary compact" type="button">Leggi profilo dal widget</button>
+      </div>
+      <pre id="readProfileOutput">null</pre>
+    </section>
+  </main>
   <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script type="text/babel" data-presets="react" src="app/assets/example3-app.jsx"></script>
+  <script>
+    const readProfileButton = document.getElementById('readProfileButton');
+    const readProfileOutput = document.getElementById('readProfileOutput');
+
+    readProfileButton.addEventListener('click', () => {
+      const profile = window.example3ProfileWidget?.getProfile?.() || null;
+      readProfileOutput.textContent = JSON.stringify(profile, null, 2);
+    });
+  </script>
 </body>
 </html>
