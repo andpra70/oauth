@@ -5,218 +5,66 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OAuth Example 3</title>
   <style>
-    :root {
-      --bg: #f7f4ee;
-      --panel: rgba(255, 252, 247, 0.94);
-      --ink: #201815;
-      --muted: #6e6257;
-      --line: #e5d9cb;
-      --primary: #0f766e;
-      --secondary: #a16207;
-      --surface: #fff;
-      --danger: #b42318;
-      --shadow: 0 24px 48px rgba(32, 24, 21, 0.1);
-    }
-
-    * { box-sizing: border-box; }
-
     body {
       margin: 0;
       min-height: 100vh;
       font-family: system-ui, sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 24%),
-        radial-gradient(circle at top right, rgba(161, 98, 7, 0.1), transparent 22%),
-        linear-gradient(180deg, #fbf8f3 0%, var(--bg) 100%);
+      color: #111827;
+      background: linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%);
     }
 
-    a { color: var(--primary); }
-
-    .example3-shell {
-      width: min(920px, calc(100% - 28px));
-      margin: 28px auto;
-      display: grid;
-      gap: 18px;
-    }
-
-    .hero,
-    .exposed-panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
+    .host-demo {
+      width: min(920px, calc(100% - 32px));
+      margin: 32px auto;
+      padding: 32px;
       border-radius: 24px;
-      box-shadow: var(--shadow);
+      background: rgba(255, 255, 255, 0.76);
+      box-shadow: 0 24px 60px rgba(15, 23, 42, 0.1);
     }
 
-    .hero,
-    .exposed-panel {
-      padding: 22px;
+    .host-demo h1 {
+      margin: 0 0 12px;
+      font-size: 2rem;
     }
 
-    .exposed-panel h2 {
-      margin: 0;
-    }
-
-    .hero-compact {
-      display: flex;
-      justify-content: flex-end;
-      align-items: center;
-    }
-
-    .oauth-widget {
-      margin-left: auto;
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      min-height: 44px;
-      padding: 8px 10px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.78);
-      border: 1px solid var(--line);
-      white-space: nowrap;
-    }
-
-    .session-avatar {
-      width: 30px;
-      height: 30px;
-      border-radius: 999px;
-      object-fit: cover;
-      flex: 0 0 auto;
-      background: #e9dfd3;
-      border: 1px solid rgba(32, 24, 21, 0.08);
-    }
-
-    .session-avatar.placeholder {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      color: #6b4e2e;
-      font-size: 0.85rem;
-      font-weight: 700;
-      background: #efe4d7;
-    }
-
-    .session-inline {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-    }
-
-    .session-text {
-      max-width: 240px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      color: var(--ink);
-      font-size: 0.92rem;
-      font-weight: 600;
-    }
-
-    .session-text.error {
-      color: var(--danger);
-    }
-
-    .session-pending {
-      color: var(--muted);
-      font-weight: 700;
-    }
-
-    button {
-      border: 0;
-      border-radius: 999px;
-      padding: 12px 16px;
-      font: inherit;
-      font-weight: 700;
-      cursor: pointer;
-    }
-
-    .compact {
-      padding: 8px 12px;
-      font-size: 0.9rem;
-    }
-
-    button:disabled {
-      opacity: 0.6;
-      cursor: wait;
-    }
-
-    .primary {
-      background: var(--primary);
-      color: #fff;
-    }
-
-    .secondary {
-      background: var(--secondary);
-      color: #fff;
-    }
-
-    .ghost {
-      background: transparent;
-      color: var(--ink);
-      border: 1px solid var(--line);
-    }
-
-    .exposed-panel {
-      display: grid;
-      gap: 12px;
-    }
-
-    .exposed-actions {
-      display: flex;
-      justify-content: flex-start;
+    .host-demo p {
+      max-width: 58ch;
+      line-height: 1.6;
     }
 
     pre {
-      margin: 0;
+      margin: 16px 0 0;
       padding: 14px;
       border-radius: 16px;
-      background: #171717;
-      color: #fafaf9;
+      background: #0f172a;
+      color: #e2e8f0;
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
-    }
-
-    @media (max-width: 720px) {
-      .hero-compact {
-        justify-content: stretch;
-      }
-
-      .oauth-widget {
-        width: 100%;
-        justify-content: space-between;
-      }
-
-      .session-inline {
-        min-width: 0;
-        flex-wrap: wrap;
-      }
     }
   </style>
 </head>
 <body>
   <div id="app"></div>
-  <main class="example3-shell">
-    <section class="exposed-panel">
-      <h2>Profilo letto via script pagina</h2>
-      <div class="exposed-actions">
-        <button id="readProfileButton" class="primary compact" type="button">Leggi profilo dal widget</button>
-      </div>
-      <pre id="readProfileOutput">null</pre>
-    </section>
+  <main class="host-demo">
+    <h1>Host page di esempio</h1>
+    <p>Il widget React viene montato come overlay fisso sopra la pagina, con stile autosufficiente e senza dipendere dal CSS host.</p>
+    <pre id="hostProfileOutput">null</pre>
   </main>
   <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <script type="text/babel" data-presets="react" src="app/assets/example3-app.jsx"></script>
   <script>
-    const readProfileButton = document.getElementById('readProfileButton');
-    const readProfileOutput = document.getElementById('readProfileOutput');
+    const hostProfileOutput = document.getElementById('hostProfileOutput');
 
-    readProfileButton.addEventListener('click', () => {
-      const profile = window.example3ProfileWidget?.getProfile?.() || null;
-      readProfileOutput.textContent = JSON.stringify(profile, null, 2);
+    function renderHostProfile(profile) {
+      hostProfileOutput.textContent = JSON.stringify(profile || null, null, 2);
+    }
+
+    window.addEventListener('oauth-widget:profile', (event) => {
+      renderHostProfile(event.detail?.profile || null);
     });
   </script>
+  <script type="text/babel" data-presets="react" src="app/assets/example3-app.jsx"></script>
 </body>
 </html>

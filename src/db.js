@@ -17,17 +17,13 @@ function buildDefaultClientUrls() {
   const basePath = normalizeBasePath(process.env.BASE_PATH || issuerUrl.pathname);
   const baseUrl = new URL(basePath ? `${basePath}/` : '/', issuerUrl.origin);
   const callbackApp = new URL('app/callback', baseUrl).toString();
-  const callbackExample = new URL('example/callback', baseUrl).toString();
-  const callbackExample2 = new URL('example2/callback', baseUrl).toString();
   const callbackExample3 = new URL('example3/callback', baseUrl).toString();
   const postLogoutApp = new URL('app', baseUrl).toString();
-  const postLogoutExample = new URL('example', baseUrl).toString();
-  const postLogoutExample2 = new URL('example2', baseUrl).toString();
   const postLogoutExample3 = new URL('example3', baseUrl).toString();
 
   return {
-    redirectUris: `${callbackApp},${callbackExample},${callbackExample2},${callbackExample3}`,
-    postLogoutRedirectUris: `${postLogoutApp},${postLogoutExample},${postLogoutExample2},${postLogoutExample3}`,
+    redirectUris: `${callbackApp},${callbackExample3}`,
+    postLogoutRedirectUris: `${postLogoutApp},${postLogoutExample3}`,
   };
 }
 
@@ -195,6 +191,130 @@ export function findUserByUsername(username) {
 export function findUserById(id) {
   const state = loadState();
   return state.users.find((user) => user.id === id);
+}
+
+export function listUsers() {
+  const state = loadState();
+  return [...state.users].sort((left, right) => {
+    const leftKey = String(left.username || left.email || left.id || '').toLowerCase();
+    const rightKey = String(right.username || right.email || right.id || '').toLowerCase();
+    return leftKey.localeCompare(rightKey);
+  });
+}
+
+async function hashPassword(password) {
+  return argon2.hash(password, {
+    type: argon2.argon2id,
+    memoryCost: 19456,
+    timeCost: 2,
+    parallelism: 1,
+  });
+}
+
+function buildUserPayload(state, input, existing = null) {
+  const username = String(input.username || '').trim();
+  const email = normalizeEmail(input.email || '') || null;
+  const authProvider = String(input.auth_provider || existing?.auth_provider || 'local').trim() || 'local';
+  const picture = String(input.picture || '').trim() || null;
+  const googleSubject = String(input.google_subject || '').trim() || null;
+  const totpEnabled = String(input.totp_enabled || existing?.totp_enabled || '0') === '1' ? 1 : 0;
+
+  if (!username) {
+    throw new Error('Username is required');
+  }
+
+  const duplicate = state.users.find((user) => user.username === username && user.id !== existing?.id);
+  if (duplicate) {
+    throw new Error('Username already exists');
+  }
+
+  if (email) {
+    const duplicateEmail = state.users.find((user) => normalizeEmail(user.email) === email && user.id !== existing?.id);
+    if (duplicateEmail) {
+      throw new Error('Email already exists');
+    }
+  }
+
+  return {
+    username,
+    email,
+    auth_provider: authProvider,
+    picture,
+    google_subject: googleSubject,
+    totp_enabled: totpEnabled,
+  };
+}
+
+export async function createUser(input) {
+  const state = loadState();
+  const payload = buildUserPayload(state, input);
+  const password = String(input.password || '');
+  const timestamp = nowIso();
+
+  if (payload.auth_provider === 'local' && password.length < 12) {
+    throw new Error('Password must be at least 12 chars long');
+  }
+
+  const secret = speakeasy.generateSecret({ name: `OAuth2 (${payload.username})` });
+  const user = {
+    id: newId('usr'),
+    ...payload,
+    totp_secret: secret.base32,
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+
+  if (password) {
+    user.password_hash = await hashPassword(password);
+  }
+
+  state.users.push(user);
+  saveState(state);
+  return user;
+}
+
+export async function updateUser(id, input) {
+  const state = loadState();
+  const index = state.users.findIndex((user) => user.id === id);
+  if (index < 0) {
+    throw new Error('User not found');
+  }
+
+  const existing = state.users[index];
+  const payload = buildUserPayload(state, input, existing);
+  const password = String(input.password || '');
+
+  state.users[index] = {
+    ...existing,
+    ...payload,
+    updated_at: nowIso(),
+  };
+
+  if (!state.users[index].totp_secret) {
+    state.users[index].totp_secret = speakeasy.generateSecret({ name: `OAuth2 (${payload.username})` }).base32;
+  }
+
+  if (password) {
+    if (password.length < 12) {
+      throw new Error('Password must be at least 12 chars long');
+    }
+    state.users[index].password_hash = await hashPassword(password);
+  }
+
+  saveState(state);
+  return state.users[index];
+}
+
+export function deleteUser(id) {
+  const state = loadState();
+  const index = state.users.findIndex((user) => user.id === id);
+  if (index < 0) {
+    throw new Error('User not found');
+  }
+
+  const [removed] = state.users.splice(index, 1);
+  saveState(state);
+  return removed;
 }
 
 export function findUserByGoogleSubject(googleSubject) {

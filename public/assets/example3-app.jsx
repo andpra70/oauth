@@ -144,16 +144,101 @@ function startLogoutFlow() {
   window.location.assign(url.toString());
 }
 
-function OAuthProfileCard({ onProfileLoaded }) {
-  const [status, setStatus] = React.useState('Verifica sessione in corso...');
-  const [error, setError] = React.useState('');
+const styles = {
+  shell: {
+    position: 'fixed',
+    top: '16px',
+    right: '16px',
+    zIndex: 2147483647,
+    pointerEvents: 'none',
+  },
+  panel: {
+    pointerEvents: 'auto',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '10px',
+    minHeight: '46px',
+    maxWidth: 'min(92vw, 360px)',
+    padding: '4px 6px 4px 4px',
+    border: '1px solid rgba(15, 23, 42, 0.08)',
+    background: 'rgba(255, 255, 255, 0.96)',
+    boxShadow: '0 10px 28px rgba(15, 23, 42, 0.16)',
+    color: '#0f172a',
+    fontFamily: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    whiteSpace: 'nowrap',
+  },
+  avatar: {
+    width: '30px',
+    height: '30px',
+    objectFit: 'cover',
+    flex: '0 0 auto',
+    background: '#e2e8f0',
+    border: '1px solid rgba(15, 23, 42, 0.08)',
+  },
+  avatarPlaceholder: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: '12px',
+    fontWeight: 700,
+    color: '#334155',
+  },
+  content: {
+    minWidth: 0,
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  text: {
+    maxWidth: '180px',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    fontSize: '13px',
+    fontWeight: 600,
+    color: '#0f172a',
+  },
+  textMuted: {
+    color: '#64748b',
+  },
+  button: {
+    border: 0,
+    padding: '7px 11px',
+    font: 'inherit',
+    fontSize: '12px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    flex: '0 0 auto',
+  },
+  loginButton: {
+    background: '#0f766e',
+    color: '#ffffff',
+  },
+  logoutButton: {
+    background: '#f59e0b',
+    color: '#111827',
+  },
+  pending: {
+    fontSize: '11px',
+    color: '#64748b',
+    fontWeight: 700,
+  },
+};
+
+function emitProfileEvent(profile) {
+  window.dispatchEvent(new CustomEvent('oauth-widget:profile', {
+    detail: { profile: profile || null },
+  }));
+}
+
+function OAuthProfileCard() {
+  const [status, setStatus] = React.useState('Verifica sessione');
   const [profile, setProfile] = React.useState(null);
   const [busy, setBusy] = React.useState(true);
 
   React.useEffect(() => {
     let active = true;
 
-    async function bootstrap() {
+    async function syncSession() {
       try {
         const params = new URLSearchParams(window.location.search);
 
@@ -161,7 +246,6 @@ function OAuthProfileCard({ onProfileLoaded }) {
           window.history.replaceState({}, document.title, appPath('example3'));
           if (active) {
             setProfile(null);
-            onProfileLoaded?.(null);
             setStatus('Sessione chiusa. Premi login per autenticarti di nuovo.');
             setBusy(false);
           }
@@ -183,7 +267,6 @@ function OAuthProfileCard({ onProfileLoaded }) {
           const me = await fetchProfile();
           if (!active) return;
           setProfile(me);
-          onProfileLoaded?.(me);
           setStatus('Utente autenticato. Profilo caricato da /me.');
           setBusy(false);
           return;
@@ -192,104 +275,96 @@ function OAuthProfileCard({ onProfileLoaded }) {
         const me = await fetchProfile();
         if (!active) return;
         setProfile(me);
-        onProfileLoaded?.(me);
-        setStatus('Utente autenticato.');
+        setStatus('Autenticato');
         setBusy(false);
       } catch (err) {
         if (!active) return;
         setProfile(null);
-        onProfileLoaded?.(null);
-        setError('');
         if (String(err?.message || '').includes('Access token non disponibile')) {
-          setStatus('Utente non loggato.');
+          setStatus('Non autenticato');
           setBusy(false);
           return;
         }
         if (String(err?.message || '').includes('UserInfo non disponibile')) {
-          setStatus('Sessione non valida. Esegui di nuovo il login.');
+          setStatus('Sessione scaduta');
           setBusy(false);
           return;
         }
-        setError(err?.message || 'Errore nel caricamento del profilo.');
-        setStatus('Impossibile determinare lo stato utente.');
+        setStatus('Errore sessione');
         setBusy(false);
       }
     }
 
-    bootstrap();
+    syncSession();
+
+    function handlePageShow() {
+      if (!active) return;
+      setBusy(true);
+      syncSession();
+    }
+
+    function handlePopState() {
+      if (!active) return;
+      setBusy(true);
+      syncSession();
+    }
+
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('popstate', handlePopState);
+
     return () => {
       active = false;
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('popstate', handlePopState);
     };
-  }, [onProfileLoaded]);
+  }, []);
 
   React.useEffect(() => {
-    window.example3ProfileWidget = {
-      getProfile() {
-        return profile;
-      },
-    };
-
-    return () => {
-      if (window.example3ProfileWidget?.getProfile) {
-        delete window.example3ProfileWidget;
-      }
-    };
+    emitProfileEvent(profile);
   }, [profile]);
 
   async function handleLogin() {
     setBusy(true);
-    setError('');
-    setStatus('Redirect al provider OAuth...');
+    setStatus('Redirect login');
     await startLoginFlow();
   }
 
   function handleLogout() {
     setBusy(true);
-    setError('');
-    setStatus('Logout in corso...');
+    setStatus('Logout');
     startLogoutFlow();
   }
 
   const avatarUrl = profile?.picture || profile?.avatar_url || '';
+  const identityLabel = profile?.email || profile?.preferred_username || profile?.sub || status;
   const avatarLabel = profile ? (profile.preferred_username || profile.email || profile.sub || 'U') : 'U';
 
   return (
-    <section className="oauth-widget">
-      {avatarUrl ? (
-        <img className="session-avatar" src={avatarUrl} alt={avatarLabel} />
-      ) : (
-        <div className="session-avatar placeholder" aria-hidden="true">{avatarLabel.slice(0, 1).toUpperCase()}</div>
-      )}
-      <div className="session-inline">
-        <span className={`session-text ${error ? 'error' : ''}`}>
-          {profile ? (profile.preferred_username || profile.email || profile.sub || 'Utente') : (error || 'Non autenticato')}
-        </span>
-        {profile ? (
-          <button className="secondary compact" onClick={handleLogout} disabled={busy}>Logout</button>
+    <section style={styles.shell}>
+      <div style={styles.panel}>
+        {avatarUrl ? (
+          <img style={styles.avatar} src={avatarUrl} alt={avatarLabel} />
         ) : (
-          <button className="primary compact" onClick={handleLogin} disabled={busy}>Login</button>
+          <div style={{ ...styles.avatar, ...styles.avatarPlaceholder }} aria-hidden="true">{avatarLabel.slice(0, 1).toUpperCase()}</div>
         )}
+        <div style={styles.content}>
+          <span style={{ ...styles.text, ...(profile ? null : styles.textMuted) }}>
+            {identityLabel}
+          </span>
+          {profile ? (
+            <button style={{ ...styles.button, ...styles.logoutButton, ...(busy ? { opacity: 0.7, cursor: 'wait' } : null) }} onClick={handleLogout} disabled={busy}>Logout</button>
+          ) : (
+            <button style={{ ...styles.button, ...styles.loginButton, ...(busy ? { opacity: 0.7, cursor: 'wait' } : null) }} onClick={handleLogin} disabled={busy}>Login</button>
+          )}
+        </div>
+        {busy ? <span style={styles.pending}>...</span> : null}
       </div>
-      {busy ? <span className="session-pending">...</span> : null}
     </section>
   );
 }
 
 function Example3App() {
-  const [profile, setProfile] = React.useState(null);
-
-  return (
-    <main className="example3-shell">
-      <section className="hero hero-compact">
-        <OAuthProfileCard onProfileLoaded={setProfile} />
-      </section>
-
-      <section className="exposed-panel">
-        <h2>Profilo esposto dal componente</h2>
-        <pre>{JSON.stringify(profile, null, 2)}</pre>
-      </section>
-    </main>
-  );
+  return <OAuthProfileCard />;
 }
 
 ReactDOM.createRoot(document.getElementById('app')).render(<Example3App />);
