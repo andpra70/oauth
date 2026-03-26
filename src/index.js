@@ -10,9 +10,9 @@ import argon2 from 'argon2';
 import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import { Provider, errors } from 'oidc-provider';
-import { ensureSchema, findUserById, findUserByUsername, getClients, seedAdminFromEnv, seedClientFromEnv, upsertGoogleUser } from './db.js';
+import { createUser, deleteUser, ensureSchema, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, updateUser, upsertGoogleUser } from './db.js';
 import { findAccount } from './account.js';
-import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderTotpQrSetup } from './html.js';
+import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderTotpQrSetup, renderUsersAdmin } from './html.js';
 import { ensureOidcStore, JsonAdapter } from './oidc-adapter.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -34,8 +34,6 @@ const runtimeConfig = {
   confirmLogout: String(process.env.CONFIRM_LOGOUT || 'true').toLowerCase() !== 'false',
 };
 const indexTemplate = readFileSync(join(publicDir, 'index.html'), 'utf8');
-const exampleTemplate = readFileSync(join(publicDir, 'example.html'), 'utf8');
-const example2Template = readFileSync(join(publicDir, 'example2.html'), 'utf8');
 const example3Template = readFileSync(join(publicDir, 'example3.html'), 'utf8');
 
 function normalizeBasePath(value) {
@@ -120,6 +118,25 @@ function getQrSetupUrl() {
   const adminUser = process.env.ADMIN_USERNAME || 'admin';
   if (!setupToken) return '';
   return resolvePath(basePath, `/setup/2fa-qr/${encodeURIComponent(adminUser)}?token=${encodeURIComponent(setupToken)}`);
+}
+
+function getSetupToken(req) {
+  const setupToken = process.env.SETUP_TOKEN || '';
+  const queryToken = String(req.query.token || '');
+  const headerToken = req.get('x-setup-token') || '';
+  if (!setupToken || (headerToken !== setupToken && queryToken !== setupToken)) {
+    return '';
+  }
+  return setupToken;
+}
+
+function requireSetupToken(req, res) {
+  const token = getSetupToken(req);
+  if (!token) {
+    res.status(403).json({ error: 'Forbidden' });
+    return '';
+  }
+  return token;
 }
 
 function isTwoFactorEnabled() {
@@ -574,14 +591,6 @@ web.get(['/', '/app', '/app/callback'], (_req, res) => {
   res.type('html').send(renderTemplate(indexTemplate));
 });
 
-web.get(['/example', '/example/callback'], (_req, res) => {
-  res.type('html').send(renderTemplate(exampleTemplate));
-});
-
-web.get(['/example2', '/example2/callback'], (_req, res) => {
-  res.type('html').send(renderTemplate(example2Template));
-});
-
 web.get(['/example3', '/example3/callback'], (_req, res) => {
   res.type('html').send(renderTemplate(example3Template));
 });
@@ -662,12 +671,8 @@ web.get('/interaction/:uid/2fa-qr', async (req, res) => {
 });
 
 web.get('/setup/runtime-config', (req, res) => {
-  const setupToken = process.env.SETUP_TOKEN || '';
-  const queryToken = String(req.query.token || '');
-  const headerToken = req.get('x-setup-token') || '';
-  if (!setupToken || (headerToken !== setupToken && queryToken !== setupToken)) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
 
   res.json({
     twoFactorEnabled: isTwoFactorEnabled(),
@@ -679,12 +684,8 @@ web.get('/setup/runtime-config', (req, res) => {
 });
 
 web.post('/setup/runtime-config', formParser, (req, res) => {
-  const setupToken = process.env.SETUP_TOKEN || '';
-  const queryToken = String(req.query.token || '');
-  const headerToken = req.get('x-setup-token') || '';
-  if (!setupToken || (headerToken !== setupToken && queryToken !== setupToken)) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
 
   if (!Object.hasOwn(req.body, 'twoFactorEnabled')) {
     if (!Object.hasOwn(req.body, 'consentEnabled') && !Object.hasOwn(req.body, 'googleOAuthEnabled') && !Object.hasOwn(req.body, 'confirmLogout')) {
@@ -712,6 +713,119 @@ web.post('/setup/runtime-config', formParser, (req, res) => {
     confirmLogout: isConfirmLogoutEnabled(),
     googleConfigured,
   });
+});
+
+web.get('/setup/users', (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  const users = listUsers();
+  const selectedUser = users[0] || null;
+  res.type('html').send(renderUsersAdmin({
+    basePath,
+    setupToken,
+    users,
+    selectedUser,
+  }));
+});
+
+web.get('/setup/users/new', (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  res.type('html').send(renderUsersAdmin({
+    basePath,
+    setupToken,
+    users: listUsers(),
+    isNew: true,
+  }));
+});
+
+web.get('/setup/users/:id', (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  const selectedUser = findUserById(req.params.id);
+  if (!selectedUser) {
+    return res.status(404).type('html').send(renderUsersAdmin({
+      basePath,
+      setupToken,
+      users: listUsers(),
+      error: 'User not found',
+      isNew: true,
+    }));
+  }
+
+  res.type('html').send(renderUsersAdmin({
+    basePath,
+    setupToken,
+    users: listUsers(),
+    selectedUser,
+  }));
+});
+
+web.post('/setup/users', formParser, async (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  try {
+    const created = await createUser(req.body);
+    res.redirect(resolvePath(basePath, `/setup/users/${encodeURIComponent(created.id)}?token=${encodeURIComponent(setupToken)}`));
+  } catch (error) {
+    res.status(400).type('html').send(renderUsersAdmin({
+      basePath,
+      setupToken,
+      users: listUsers(),
+      isNew: true,
+      error: error.message || 'Unable to create user',
+      formValues: req.body,
+    }));
+  }
+});
+
+web.post('/setup/users/:id', formParser, async (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  try {
+    const updated = await updateUser(req.params.id, req.body);
+    res.type('html').send(renderUsersAdmin({
+      basePath,
+      setupToken,
+      users: listUsers(),
+      selectedUser: updated,
+      notice: 'User updated',
+    }));
+  } catch (error) {
+    const selectedUser = findUserById(req.params.id);
+    res.status(400).type('html').send(renderUsersAdmin({
+      basePath,
+      setupToken,
+      users: listUsers(),
+      selectedUser,
+      error: error.message || 'Unable to update user',
+      formValues: req.body,
+    }));
+  }
+});
+
+web.post('/setup/users/:id/delete', formParser, (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  try {
+    deleteUser(req.params.id);
+    res.redirect(resolvePath(basePath, `/setup/users?token=${encodeURIComponent(setupToken)}`));
+  } catch (error) {
+    const selectedUser = findUserById(req.params.id);
+    res.status(400).type('html').send(renderUsersAdmin({
+      basePath,
+      setupToken,
+      users: listUsers(),
+      selectedUser,
+      error: error.message || 'Unable to delete user',
+    }));
+  }
 });
 
 web.get('/interaction/:uid/continue', async (req, res, next) => {

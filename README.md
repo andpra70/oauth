@@ -50,18 +50,6 @@ UI integrata nello stesso container:
 http://localhost:9000/app
 ```
 
-Example minimale:
-
-```text
-http://localhost:9000/example
-```
-
-Example auto-login:
-
-```text
-http://localhost:9000/example2
-```
-
 Example React:
 
 ```text
@@ -83,10 +71,6 @@ Endpoint applicativi:
 - `GET /`
 - `GET /app`
 - `GET /app/callback`
-- `GET /example`
-- `GET /example/callback`
-- `GET /example2`
-- `GET /example2/callback`
 - `GET /example3`
 - `GET /example3/callback`
 - `GET /health`
@@ -356,5 +340,5 @@ Il login username/password resta invariato per gli utenti locali già presenti n
 - In Docker il volume host `./data/oauth` viene montato in `/app/data`
 - Le variabili runtime sono caricate da `.env`
 - Il client seedato di default usa `client_id=fileserver-web`
-- I redirect URI seedati di default includono `http://localhost:9000/app/callback`, `http://localhost:9000/example/callback`, `http://localhost:9000/example2/callback` e `http://localhost:9000/example3/callback`
+- I redirect URI seedati di default includono `http://localhost:9000/app/callback` e `http://localhost:9000/example3/callback`
 - Se `DEFAULT_CLIENT_AUTH_METHOD=none`, lo scambio code -> token usa PKCE senza `client_secret`

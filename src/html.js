@@ -195,3 +195,160 @@ export function renderTotpQrSetup({ username = '', otpauthUrl = '', dataUrl = ''
     </div>
   `);
 }
+
+export function renderUsersAdmin({
+  basePath = '',
+  setupToken = '',
+  users = [],
+  selectedUser = null,
+  formValues = {},
+  error = '',
+  notice = '',
+  isNew = false,
+} = {}) {
+  const tokenQuery = `?token=${encodeURIComponent(setupToken)}`;
+  const current = selectedUser || null;
+  const values = {
+    username: formValues.username ?? current?.username ?? '',
+    email: formValues.email ?? current?.email ?? '',
+    auth_provider: formValues.auth_provider ?? current?.auth_provider ?? 'local',
+    picture: formValues.picture ?? current?.picture ?? '',
+    google_subject: formValues.google_subject ?? current?.google_subject ?? '',
+    totp_enabled: String(formValues.totp_enabled ?? current?.totp_enabled ?? '0') === '1' ? '1' : '0',
+  };
+  const formAction = isNew
+    ? resolvePath(basePath, `/setup/users${tokenQuery}`)
+    : resolvePath(basePath, `/setup/users/${encodeURIComponent(current?.id || '')}${tokenQuery}`);
+
+  const listItems = users.map((user) => {
+    const isActive = current?.id === user.id && !isNew;
+    const label = user.email || user.username || user.id;
+    return `
+      <a class="user-link${isActive ? ' active' : ''}" href="${escapeHtml(resolvePath(basePath, `/setup/users/${encodeURIComponent(user.id)}${tokenQuery}`))}">
+        <strong>${escapeHtml(user.username || user.id)}</strong>
+        <span>${escapeHtml(label)}</span>
+      </a>
+    `;
+  }).join('');
+
+  const deleteForm = current ? `
+    <form method="post" action="${escapeHtml(resolvePath(basePath, `/setup/users/${encodeURIComponent(current.id)}/delete${tokenQuery}`))}" onsubmit="return confirm('Delete user ${escapeHtml(current.username || current.id)}?')">
+      <button class="secondary danger" type="submit">Delete user</button>
+    </form>
+  ` : '';
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>User management</title>
+  <style>
+    body { margin:0; font-family:system-ui,sans-serif; background:#0f172a; color:#e2e8f0; }
+    main { width:min(1180px, calc(100% - 32px)); margin:24px auto; display:grid; gap:16px; }
+    .shell { display:grid; grid-template-columns: 320px minmax(0, 1fr); gap:16px; align-items:start; }
+    .panel { border:1px solid #334155; background:#111827; padding:18px; }
+    h1,h2,h3,p { margin:0; }
+    .topbar { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+    .muted { color:#94a3b8; }
+    .list { display:grid; gap:8px; margin-top:16px; }
+    .user-link { display:grid; gap:2px; padding:10px 12px; text-decoration:none; color:#e2e8f0; border:1px solid #334155; background:#0b1220; }
+    .user-link.active { border-color:#60a5fa; background:#172033; }
+    .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:16px; }
+    .form-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:12px; margin-top:16px; }
+    .field { display:grid; gap:6px; }
+    .field.full { grid-column:1 / -1; }
+    label { font-size:13px; color:#94a3b8; }
+    input, select { width:100%; padding:10px; border:1px solid #475569; background:#0b1220; color:#e2e8f0; box-sizing:border-box; }
+    button, .button-link { padding:10px 12px; border:0; background:#2563eb; color:#fff; text-decoration:none; cursor:pointer; font-weight:600; display:inline-block; }
+    .secondary { background:#374151; }
+    .danger { background:#991b1b; }
+    .message { margin-top:12px; padding:10px 12px; border:1px solid #334155; background:#0b1220; }
+    .message.error { border-color:#7f1d1d; color:#fecaca; }
+    .meta { display:grid; gap:6px; margin-top:16px; color:#94a3b8; font-size:13px; }
+    @media (max-width: 860px) {
+      .shell { grid-template-columns: 1fr; }
+      .form-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel topbar">
+      <div>
+        <h1>User management</h1>
+        <p class="muted">Create, inspect, edit and delete users stored in the JSON database.</p>
+      </div>
+      <div class="actions">
+        <a class="button-link secondary" href="${escapeHtml(resolvePath(basePath, `/setup/users/new${tokenQuery}`))}">Add user</a>
+        <a class="button-link secondary" href="${escapeHtml(resolvePath(basePath, `/app`))}">Back to app</a>
+      </div>
+    </section>
+
+    <section class="shell">
+      <aside class="panel">
+        <h2>Users</h2>
+        <p class="muted" style="margin-top:6px;">${users.length} total</p>
+        <div class="list">${listItems || '<p class="muted" style="margin-top:12px;">No users found.</p>'}</div>
+      </aside>
+
+      <section class="panel">
+        <h2>${isNew ? 'Add user' : 'User detail'}</h2>
+        ${notice ? `<div class="message">${escapeHtml(notice)}</div>` : ''}
+        ${error ? `<div class="message error">${escapeHtml(error)}</div>` : ''}
+        <form method="post" action="${escapeHtml(formAction)}">
+          <div class="form-grid">
+            <div class="field">
+              <label>Username</label>
+              <input name="username" required value="${escapeHtml(values.username)}" />
+            </div>
+            <div class="field">
+              <label>Email</label>
+              <input name="email" type="email" value="${escapeHtml(values.email)}" />
+            </div>
+            <div class="field">
+              <label>Auth provider</label>
+              <select name="auth_provider">
+                <option value="local"${values.auth_provider === 'local' ? ' selected' : ''}>local</option>
+                <option value="google"${values.auth_provider === 'google' ? ' selected' : ''}>google</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>TOTP enabled</label>
+              <select name="totp_enabled">
+                <option value="0"${values.totp_enabled === '0' ? ' selected' : ''}>No</option>
+                <option value="1"${values.totp_enabled === '1' ? ' selected' : ''}>Yes</option>
+              </select>
+            </div>
+            <div class="field full">
+              <label>Password ${isNew ? '(required, min 12 chars for local users)' : '(leave empty to keep current)'}</label>
+              <input name="password" type="password" ${isNew ? '' : ''} />
+            </div>
+            <div class="field full">
+              <label>Google subject</label>
+              <input name="google_subject" value="${escapeHtml(values.google_subject)}" />
+            </div>
+            <div class="field full">
+              <label>Picture URL</label>
+              <input name="picture" value="${escapeHtml(values.picture)}" />
+            </div>
+          </div>
+          <div class="actions">
+            <button type="submit">${isNew ? 'Create user' : 'Save changes'}</button>
+            ${!isNew ? `<a class="button-link secondary" href="${escapeHtml(resolvePath(basePath, `/setup/users/new${tokenQuery}`))}">New user</a>` : ''}
+          </div>
+        </form>
+        ${deleteForm}
+        ${current ? `
+          <div class="meta">
+            <div><strong>ID:</strong> ${escapeHtml(current.id || '')}</div>
+            <div><strong>Created:</strong> ${escapeHtml(current.created_at || '')}</div>
+            <div><strong>Updated:</strong> ${escapeHtml(current.updated_at || '')}</div>
+          </div>
+        ` : ''}
+      </section>
+    </section>
+  </main>
+</body>
+</html>`;
+}
