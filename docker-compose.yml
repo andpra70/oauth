@@ -1,5 +1,6 @@
 services:
   oauth-server:
+    container_name: ${OAUTH_SERVER_CONTAINER_NAME:-oauth-server}
     build:
       context: .
       dockerfile: Dockerfile
@@ -21,12 +22,33 @@ services:
       DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS: ${DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS:-}
       SETUP_TOKEN: ${SETUP_TOKEN}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:9000,http://localhost:8080,http://localhost}
+      TWO_FACTOR_ENABLED: ${TWO_FACTOR_ENABLED:-true}
+      CONSENT_ENABLED: ${CONSENT_ENABLED:-true}
+      GOOGLE_OAUTH_ENABLED: ${GOOGLE_OAUTH_ENABLED:-true}
+      PASSKEY_ENABLED: ${PASSKEY_ENABLED:-false}
+      CONFIRM_LOGOUT: ${CONFIRM_LOGOUT:-true}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_CALLBACK_PATH: ${GOOGLE_CALLBACK_PATH:-}
       GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-}
+      PASSKEY_RP_NAME: ${PASSKEY_RP_NAME:-Local OAuth2 Server}
+      PASSKEY_RP_ID: ${PASSKEY_RP_ID:-}
+      PASSKEY_ORIGIN: ${PASSKEY_ORIGIN:-}
     ports:
       - "${OAUTH_SERVER_PORT:-9000}:${PORT:-9000}"
+    command: ["npm", "start"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:' + (process.env.PORT || 9000) + '/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     volumes:
       - ${OAUTH_SERVER_DATA_VOLUME:-oauth-server-data}:/app/data/oauth
 

@@ -5,9 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/index.js",
-    "start": "node src/index.js"
+    "dev:all": "concurrently -k \"npm:dev\" \"npm:ui:dev\"",
+    "start": "node src/index.js",
+    "ui:build": "vite build",
+    "ui:dev": "vite build --mode development --watch"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13.2.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "argon2": "^0.41.1",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
@@ -16,5 +22,10 @@
     "oidc-provider": "^8.5.1",
     "qrcode": "^1.5.4",
     "speakeasy": "^2.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.2.1",
+    "vite": "^5.4.14"
   }
 }

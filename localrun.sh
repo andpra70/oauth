@@ -9,4 +9,5 @@ if [[ ! -d node_modules ]]; then
   npm install
 fi
 
-npm run dev
+npm run ui:build
+npm run dev:all

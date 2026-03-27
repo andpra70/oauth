@@ -31,7 +31,7 @@ I path del compose restano relativi alla directory che contiene `docker-compose.
 
 Se `DEFAULT_CLIENT_REDIRECT_URIS`, `DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS`, `GOOGLE_CALLBACK_PATH` e `GOOGLE_CALLBACK_URL` non sono valorizzate, l'app li deriva automaticamente da `ISSUER` e `BASE_PATH`.
 
-`TWO_FACTOR_ENABLED`, `CONSENT_ENABLED`, `GOOGLE_OAUTH_ENABLED` e `CONFIRM_LOGOUT` impostano lo stato iniziale del server all'avvio. Per cambiare i flag a caldo senza riavviare usa `POST /setup/runtime-config`.
+`TWO_FACTOR_ENABLED`, `CONSENT_ENABLED`, `GOOGLE_OAUTH_ENABLED`, `PASSKEY_ENABLED` e `CONFIRM_LOGOUT` impostano lo stato iniziale del server all'avvio. Per cambiare i flag a caldo senza riavviare usa `POST /setup/runtime-config`.
 
 Variabili specifiche del compose:
 
@@ -50,11 +50,120 @@ UI integrata nello stesso container:
 http://localhost:9000/app
 ```
 
-Example React:
+AuthWidget React:
 
 ```text
-http://localhost:9000/example3
+http://localhost:9000/authWidget
 ```
+
+Configurazione runtime AuthWidget (cross-origin/embeddable):
+
+- via `window.__AUTH_WIDGET_CONFIG__` prima di caricare `app/assets/authWidget.js`
+- oppure via query string su `/authWidget`:
+  - `awIssuer`
+  - `awClientId`
+  - `awRedirectUri`
+  - `awOrigin` (base per risolvere URI relative)
+  - `awPostLogoutRedirectUri`
+  - `awScope`
+  - CTA flags: `awShowLogin`, `awShowLogout`, `awShowExpand`, `awShowEditProfile`
+
+Esempio:
+
+```text
+http://localhost:9000/authWidget?awIssuer=http://localhost:9000&awClientId=fileserver-web&awOrigin=http://localhost:8080&awRedirectUri=/oauth/callback&awPostLogoutRedirectUri=/logged-out
+```
+
+Con `awShowExpand` il widget si espande/collassa cliccando la picture/avatar, mostra i campi profilo e abilita `Edit profile` (se non disabilitato). Il salvataggio usa `PATCH /me` con whitelist dei campi aggiornabili (`preferred_username`, `email`, `picture`).
+
+## Integrazione Login Da Altre App Nello Stesso Stack Compose
+
+Questa sezione descrive come integrare il provider OIDC da applicazioni montate nello stesso `docker-compose.yml`.
+
+### 1) Concetto Chiave: URL Browser vs URL Interno Docker
+
+Nel browser devi usare l'URL pubblico del provider (esempio `http://localhost:9000`).
+
+Dentro la rete Docker tra container puoi usare il nome servizio (esempio `http://oauth-server:9000`).
+
+Regola pratica:
+
+- SPA che chiama `/auth` e `/token` dal browser: usa sempre URL pubblico.
+- Backend/BFF che chiama `/token` server-to-server: può usare URL interno Docker.
+
+### 2) Configura Il Client OIDC Con Le Redirect URI Della Tua App
+
+Nel file `.env` del provider inserisci tutte le callback consentite del client, separate da virgola.
+
+Esempio:
+
+```bash
+DEFAULT_CLIENT_ID=fileserver-web
+DEFAULT_CLIENT_AUTH_METHOD=none
+DEFAULT_CLIENT_REDIRECT_URIS=http://localhost:9000/app/callback,http://localhost:9000/authWidget/callback,http://localhost:8080/oauth/callback
+DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS=http://localhost:9000/app,http://localhost:9000/authWidget,http://localhost:8080
+ALLOWED_ORIGINS=http://localhost:9000,http://localhost:8080,http://localhost
+```
+
+Se manca la redirect URI reale della tua app, vedrai errori su `/token` (`400 Bad Request`).
+
+### 3) Esempio Compose Con App Esterna
+
+```yaml
+services:
+  oauth-server:
+    build: .
+    ports:
+      - "9000:9000"
+
+  webapp:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./my-webapp:/app
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "8080:8080"
+    environment:
+      OIDC_ISSUER_PUBLIC: http://localhost:9000
+      OIDC_ISSUER_INTERNAL: http://oauth-server:9000
+```
+
+### 4) Flusso Consigliato Per SPA
+
+1. La SPA genera PKCE (`code_verifier` e `code_challenge`).
+2. La SPA apre `GET /auth` su issuer pubblico (`http://localhost:9000/auth?...`).
+3. Dopo callback, la SPA fa `POST /token` sempre verso issuer pubblico.
+4. La SPA usa `access_token` su `GET /me`.
+
+Per una SPA pura non usare `http://oauth-server:9000` nel codice frontend, perché il browser non risolve il nome servizio Docker.
+
+### 5) Flusso Consigliato Per BFF (Backend For Frontend)
+
+1. Frontend manda `code` al backend app.
+2. Backend app scambia `code` su `/token`.
+3. In questo passaggio backend puoi usare URL interno `http://oauth-server:9000/token`.
+4. Il backend gestisce sessione/token e restituisce dati al frontend.
+
+### 6) Callback Di Interaction Per App Esterne
+
+Se vuoi orchestrare il login da una UI esterna, passa `callbackUrl` nella richiesta `/auth`.
+L'origin di `callbackUrl` deve essere presente in `ALLOWED_ORIGINS`.
+
+Esempio:
+
+```text
+http://localhost:9000/auth?client_id=fileserver-web&redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Foauth%2Fcallback&response_type=code&scope=openid%20profile%20email%20offline_access&callbackUrl=http%3A%2F%2Flocalhost%3A8080%2Foauth%2Fstate&code_challenge=...&code_challenge_method=S256&state=...
+```
+
+### 7) Checklist Rapida Di Troubleshooting
+
+1. `ISSUER` pubblico raggiungibile dal browser.
+2. Redirect URI esatta presente in `DEFAULT_CLIENT_REDIRECT_URIS`.
+3. `DEFAULT_CLIENT_AUTH_METHOD=none` per client PKCE pubblico senza secret.
+4. Origin della tua app presente in `ALLOWED_ORIGINS`.
+5. Dopo modifica `.env`, riavvia il container provider.
+6. Verifica discovery: `curl http://localhost:9000/.well-known/openid-configuration`.
 
 Script disponibili:
 
@@ -71,13 +180,15 @@ Endpoint applicativi:
 - `GET /`
 - `GET /app`
 - `GET /app/callback`
-- `GET /example3`
-- `GET /example3/callback`
+- `GET /authWidget`
+- `GET /authWidget/callback`
 - `GET /health`
 - `GET /setup/2fa-qr/:username`
 - `GET /setup/2fa-qr/:username.json`
 - `GET /setup/runtime-config`
 - `POST /setup/runtime-config`
+- `POST /setup/passkeys/:username/options`
+- `POST /setup/passkeys/:username/verify`
 
 Endpoint OIDC/OAuth2:
 
@@ -93,9 +204,17 @@ Endpoint OIDC/OAuth2:
 Endpoint interni di interaction usati dal login browser-based:
 
 - `GET /interaction/:uid`
+- `GET /interaction/:uid/register`
+- `POST /interaction/:uid/register`
 - `POST /interaction/:uid/login`
 - `GET /interaction/:uid/login/google`
 - `GET /interaction/:uid/register/google`
+- `POST /interaction/:uid/passkey/onboarding/options`
+- `POST /interaction/:uid/passkey/onboarding/verify`
+- `GET /interaction/:uid/passkey/onboarding/continue`
+- `POST /interaction/:uid/passkey/options`
+- `POST /interaction/:uid/passkey/verify`
+- `GET /interaction/:uid/passkey/continue`
 - `POST /interaction/:uid/2fa`
 - `POST /interaction/:uid/confirm`
 - `POST /interaction/:uid/abort`
@@ -218,6 +337,22 @@ curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-boot
   --data 'googleOAuthEnabled=true'
 ```
 
+Per abilitare passkey (WebAuthn) a caldo:
+
+```bash
+curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token" \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  --data 'passkeyEnabled=true'
+```
+
+Per disabilitare passkey a caldo:
+
+```bash
+curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-bootstrap-token" \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  --data 'passkeyEnabled=false'
+```
+
 Per disabilitare la conferma su `session/end` e fare logout diretto:
 
 ```bash
@@ -236,12 +371,18 @@ curl -X POST "http://localhost:9000/setup/runtime-config?token=replace-with-boot
 
 ## Callback di interaction
 
-Puoi passare `callbackUrl` nella richiesta `/auth`. Il valore deve appartenere a uno degli origin consentiti in `ALLOWED_ORIGINS`.
+Puoi passare `callbackUrl` e `backUrl` nella richiesta `/auth`. Entrambi devono appartenere a uno degli origin consentiti in `ALLOWED_ORIGINS`.
 
 Esempio:
 
 ```text
 http://localhost:9000/auth?client_id=fileserver-web&redirect_uri=http%3A%2F%2Flocalhost%3A9000%2Fapp%2Fcallback&response_type=code&scope=openid%20profile%20email%20offline_access&callbackUrl=http%3A%2F%2Flocalhost%3A8080%2Foauth%2Fstate&code_challenge=...&code_challenge_method=S256&state=...
+```
+
+Esempio con `backUrl` (CTA “Back to application” nelle pagine login/register/onboarding):
+
+```text
+http://localhost:9000/auth?client_id=fileserver-web&redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Foauth%2Fcallback&response_type=code&scope=openid%20profile%20email%20offline_access&backUrl=http%3A%2F%2Flocalhost%3A8080%2Flogin&code_challenge=...&code_challenge_method=S256&state=...
 ```
 
 Quando il login è pronto, oppure quando il consenso viene approvato o negato, il browser viene rediretto a `callbackUrl` con questi parametri query:
@@ -321,6 +462,40 @@ Esempio di record utente creato:
 
 Il login username/password resta invariato per gli utenti locali già presenti nel database.
 
+## Setup Passkey (WebAuthn)
+
+Variabili disponibili:
+
+```bash
+PASSKEY_ENABLED=false
+PASSKEY_RP_NAME=Local OAuth2 Server
+# PASSKEY_RP_ID defaults to ISSUER hostname
+# PASSKEY_ORIGIN defaults to ISSUER origin
+# PASSKEY_RP_ID=
+# PASSKEY_ORIGIN=
+```
+
+Bootstrap registrazione passkey da UI:
+
+1. Apri `http://localhost:9000/app`.
+2. Inserisci `Setup token TOTP` e `Admin username`.
+3. Premi `Registra Passkey`.
+4. Completa la challenge WebAuthn nel browser/dispositivo.
+
+Login passkey:
+
+1. Apri il flow standard `/auth`.
+2. Nella schermata `/interaction/:uid` usa `Accedi con Passkey`.
+3. Se l'utente ha TOTP attivo e `TWO_FACTOR_ENABLED=true`, dopo passkey viene richiesto OTP.
+
+API bootstrap passkey (alternativa alla UI):
+
+1. `POST /setup/passkeys/:username/options?token=...`
+2. Esegui `navigator.credentials.create()` con le opzioni ricevute.
+3. `POST /setup/passkeys/:username/verify?token=...` con l'attestation response.
+
+Nota: WebAuthn richiede origin sicuro (`https`) oppure `localhost` in sviluppo.
+
 ## Sicurezza implementata
 
 - Password hashate con Argon2id
@@ -340,5 +515,5 @@ Il login username/password resta invariato per gli utenti locali già presenti n
 - In Docker il volume host `./data/oauth` viene montato in `/app/data`
 - Le variabili runtime sono caricate da `.env`
 - Il client seedato di default usa `client_id=fileserver-web`
-- I redirect URI seedati di default includono `http://localhost:9000/app/callback` e `http://localhost:9000/example3/callback`
+- I redirect URI seedati di default includono `http://localhost:9000/app/callback` e `http://localhost:9000/authWidget/callback`
 - Se `DEFAULT_CLIENT_AUTH_METHOD=none`, lo scambio code -> token usa PKCE senza `client_secret`
