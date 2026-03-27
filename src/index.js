@@ -10,9 +10,10 @@ import argon2 from 'argon2';
 import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import { Provider, errors } from 'oidc-provider';
-import { createUser, deleteUser, ensureSchema, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, updateUser, upsertGoogleUser } from './db.js';
+import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
+import { clearUserPasskeys, createUser, deleteUser, ensureSchema, findPasskeyByCredentialId, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, touchUserPasskeyCounter, updateUser, updateUserProfile, upsertGoogleUser, upsertUserPasskey } from './db.js';
 import { findAccount } from './account.js';
-import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderTotpQrSetup, renderUsersAdmin } from './html.js';
+import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderPasskeyOnboarding, renderRegister, renderTotpQrSetup, renderUsersAdmin } from './html.js';
 import { ensureOidcStore, JsonAdapter } from './oidc-adapter.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,10 +32,11 @@ const runtimeConfig = {
   twoFactorEnabled: String(process.env.TWO_FACTOR_ENABLED || 'true').toLowerCase() !== 'false',
   consentEnabled: String(process.env.CONSENT_ENABLED || 'true').toLowerCase() !== 'false',
   googleOAuthEnabled: String(process.env.GOOGLE_OAUTH_ENABLED || 'true').toLowerCase() !== 'false',
+  passkeyEnabled: String(process.env.PASSKEY_ENABLED || 'false').toLowerCase() === 'true',
   confirmLogout: String(process.env.CONFIRM_LOGOUT || 'true').toLowerCase() !== 'false',
 };
 const indexTemplate = readFileSync(join(publicDir, 'index.html'), 'utf8');
-const example3Template = readFileSync(join(publicDir, 'example3.html'), 'utf8');
+const authWidgetTemplate = readFileSync(join(publicDir, 'authWidget.html'), 'utf8');
 
 function normalizeBasePath(value) {
   const raw = String(value || '').trim();
@@ -70,6 +72,21 @@ function normalizeOrigin(value) {
   }
 }
 
+function parseBearerToken(req) {
+  const auth = String(req.get('authorization') || '');
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  return match ? String(match[1] || '').trim() : '';
+}
+
+async function resolveAccessToken(req) {
+  const tokenValue = parseBearerToken(req);
+  if (!tokenValue) return null;
+  const token = await provider.AccessToken.find(tokenValue);
+  if (!token) return null;
+  if (typeof token.isExpired === 'function' && token.isExpired()) return null;
+  return token;
+}
+
 if (cookieKeys.length < 3) {
   throw new Error('COOKIE_KEYS must include at least 3 comma-separated secrets');
 }
@@ -96,6 +113,10 @@ const totpSetupSessions = new Map();
 const googleLoginStates = new Map();
 const googleCallbackSessions = new Map();
 const interactionCallbackSessions = new Map();
+const passkeyAuthSessions = new Map();
+const passkeyRegistrationSessions = new Map();
+const passkeyCompletionSessions = new Map();
+const passkeyOnboardingSessions = new Map();
 
 const googleClientId = process.env.GOOGLE_CLIENT_ID || '';
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -104,6 +125,9 @@ const googleCallbackPath = process.env.GOOGLE_CALLBACK_PATH || defaultGoogleCall
 const googleCallbackRoutePath = stripBasePath(googleCallbackPath, basePath);
 const googleCallbackUrl = process.env.GOOGLE_CALLBACK_URL || new URL(googleCallbackPath, `${issuerUrl.origin}/`).toString();
 const googleConfigured = Boolean(googleClientId && googleClientSecret);
+const passkeyRpId = process.env.PASSKEY_RP_ID || issuerUrl.hostname;
+const passkeyOrigin = process.env.PASSKEY_ORIGIN || issuerUrl.origin;
+const passkeyRpName = process.env.PASSKEY_RP_NAME || 'Local OAuth2 Server';
 
 function renderTemplate(template) {
   const appConfig = JSON.stringify({ basePath, baseHref, issuer }).replace(/</g, '\\u003c');
@@ -155,12 +179,26 @@ function isConfirmLogoutEnabled() {
   return runtimeConfig.confirmLogout;
 }
 
+function isPasskeyEnabled() {
+  return runtimeConfig.passkeyEnabled;
+}
+
 function parseBooleanFlag(value, fallback = false) {
   const normalized = String(value ?? '').trim().toLowerCase();
   if (!normalized) return fallback;
   if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
   if (['false', '0', 'no', 'off'].includes(normalized)) return false;
   return fallback;
+}
+
+function toBase64Url(value) {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  return Buffer.from(value).toString('base64url');
+}
+
+function fromBase64Url(value) {
+  return Buffer.from(String(value || ''), 'base64url');
 }
 
 function buildAbsoluteAppUrl(path) {
@@ -188,6 +226,10 @@ function getInteractionCallbackUrl(params) {
   return getSafeCallbackUrl(params?.callbackUrl || params?.callback_url);
 }
 
+function getInteractionBackUrl(params) {
+  return getSafeCallbackUrl(params?.backUrl || params?.back_url || params?.backurl);
+}
+
 async function buildQrSetupPayload(user) {
   if (!user?.totp_secret || !user?.username) {
     return null;
@@ -212,11 +254,12 @@ async function getQrSetupPayload(username) {
   return buildQrSetupPayload(user);
 }
 
-function createTotpChallenge(uid, accountId) {
+function createTotpChallenge(uid, accountId, intent = 'login') {
   const challenge = randomUUID();
   totpChallenges.set(challenge, {
     uid,
     accountId,
+    intent,
     expiresAt: Date.now() + 3 * 60 * 1000,
   });
   return challenge;
@@ -250,7 +293,7 @@ function getTotpSetupSession(token, uid) {
 
 function getGoogleLoginUrl(uid) {
   if (!isGoogleOAuthEnabled()) return '';
-  return resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/login/google`);
+  return getGoogleRegisterUrl(uid);
 }
 
 function getGoogleRegisterUrl(uid) {
@@ -258,10 +301,11 @@ function getGoogleRegisterUrl(uid) {
   return resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/register/google`);
 }
 
-function createGoogleState(uid) {
+function createGoogleState(uid, mode = 'login') {
   const state = randomUUID();
   googleLoginStates.set(state, {
     uid,
+    mode,
     expiresAt: Date.now() + 10 * 60 * 1000,
   });
   return state;
@@ -275,11 +319,12 @@ function consumeGoogleState(state) {
   return data;
 }
 
-function createGoogleCallbackSession(uid, accountId) {
+function createGoogleCallbackSession(uid, accountId, mode = 'login') {
   const token = randomUUID();
   googleCallbackSessions.set(token, {
     uid,
     accountId,
+    mode,
     expiresAt: Date.now() + 3 * 60 * 1000,
   });
   return token;
@@ -311,6 +356,92 @@ function consumeGoogleCallbackSession(token, uid) {
   if (!data) return null;
   if (data.uid !== uid) return null;
   if (Date.now() > data.expiresAt) return null;
+  return data;
+}
+
+function createPasskeyAuthSession(uid, challenge) {
+  const token = randomUUID();
+  passkeyAuthSessions.set(token, {
+    uid,
+    challenge,
+    expiresAt: Date.now() + 3 * 60 * 1000,
+  });
+  return token;
+}
+
+function consumePasskeyAuthSession(token, uid) {
+  const data = passkeyAuthSessions.get(token);
+  passkeyAuthSessions.delete(token);
+  if (!data) return null;
+  if (data.uid !== uid) return null;
+  if (Date.now() > data.expiresAt) return null;
+  return data;
+}
+
+function createPasskeyRegistrationSession(username, challenge) {
+  const token = randomUUID();
+  passkeyRegistrationSessions.set(token, {
+    username,
+    challenge,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+  });
+  return token;
+}
+
+function consumePasskeyRegistrationSession(token, username) {
+  const data = passkeyRegistrationSessions.get(token);
+  passkeyRegistrationSessions.delete(token);
+  if (!data) return null;
+  if (data.username !== username) return null;
+  if (Date.now() > data.expiresAt) return null;
+  return data;
+}
+
+function createPasskeyCompletionSession(uid, payload) {
+  const token = randomUUID();
+  passkeyCompletionSessions.set(token, {
+    uid,
+    ...payload,
+    expiresAt: Date.now() + 3 * 60 * 1000,
+  });
+  return token;
+}
+
+function consumePasskeyCompletionSession(token, uid) {
+  const data = passkeyCompletionSessions.get(token);
+  passkeyCompletionSessions.delete(token);
+  if (!data) return null;
+  if (data.uid !== uid) return null;
+  if (Date.now() > data.expiresAt) return null;
+  return data;
+}
+
+function createPasskeyOnboardingSession(uid, accountId) {
+  const token = randomUUID();
+  passkeyOnboardingSessions.set(token, {
+    uid,
+    accountId,
+    challenge: '',
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+  return token;
+}
+
+function getPasskeyOnboardingSession(token, uid) {
+  const data = passkeyOnboardingSessions.get(token);
+  if (!data) return null;
+  if (data.uid !== uid) return null;
+  if (Date.now() > data.expiresAt) {
+    passkeyOnboardingSessions.delete(token);
+    return null;
+  }
+  return data;
+}
+
+function consumePasskeyOnboardingSession(token, uid) {
+  const data = getPasskeyOnboardingSession(token, uid);
+  if (!data) return null;
+  passkeyOnboardingSessions.delete(token);
   return data;
 }
 
@@ -360,9 +491,10 @@ async function startGoogleAuth(req, res, next) {
     }
 
     const { uid } = req.params;
+    const mode = 'register';
     await provider.interactionDetails(req, res);
 
-    const state = createGoogleState(uid);
+    const state = createGoogleState(uid, mode);
     const redirectUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     redirectUrl.searchParams.set('client_id', googleClientId);
     redirectUrl.searchParams.set('redirect_uri', googleCallbackUrl);
@@ -404,6 +536,10 @@ function verifyTotpToken(user, otp) {
 
 function isTotpRequired(user) {
   return isTwoFactorEnabled() && Boolean(user?.totp_enabled);
+}
+
+function hasPasskeys(user) {
+  return Array.isArray(user?.passkeys) && user.passkeys.length > 0;
 }
 
 async function finishLogin(req, res, accountId) {
@@ -452,6 +588,36 @@ function respondExpiredSession(res) {
   res.end(renderExpiredSession({ basePath }));
 }
 
+function renderLoginPage(params = {}) {
+  return renderLogin({
+    ...params,
+    passkeyEnabled: isPasskeyEnabled(),
+    registerUrl: params.registerUrl || (params.uid ? resolvePath(basePath, `/interaction/${encodeURIComponent(params.uid)}/register`) : ''),
+  });
+}
+
+function renderRegisterPage(params = {}) {
+  return renderRegister({
+    ...params,
+    passkeyEnabled: isPasskeyEnabled(),
+    loginUrl: params.loginUrl || (params.uid ? resolvePath(basePath, `/interaction/${encodeURIComponent(params.uid)}`) : ''),
+  });
+}
+
+async function renderPasskeyOnboardingForUser(req, res, uid, user) {
+  const details = await provider.interactionDetails(req, res);
+  const backUrl = getInteractionBackUrl(details?.params);
+  const token = createPasskeyOnboardingSession(uid, user.id);
+  res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(renderPasskeyOnboarding({
+    basePath,
+    uid,
+    token,
+    username: user.username,
+    backUrl,
+  }));
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [key, value] of totpChallenges.entries()) {
@@ -468,6 +634,18 @@ setInterval(() => {
   }
   for (const [key, value] of interactionCallbackSessions.entries()) {
     if (value.expiresAt < now) interactionCallbackSessions.delete(key);
+  }
+  for (const [key, value] of passkeyAuthSessions.entries()) {
+    if (value.expiresAt < now) passkeyAuthSessions.delete(key);
+  }
+  for (const [key, value] of passkeyRegistrationSessions.entries()) {
+    if (value.expiresAt < now) passkeyRegistrationSessions.delete(key);
+  }
+  for (const [key, value] of passkeyCompletionSessions.entries()) {
+    if (value.expiresAt < now) passkeyCompletionSessions.delete(key);
+  }
+  for (const [key, value] of passkeyOnboardingSessions.entries()) {
+    if (value.expiresAt < now) passkeyOnboardingSessions.delete(key);
   }
 }, 30_000).unref();
 
@@ -537,6 +715,12 @@ const provider = new Provider(issuer, {
         throw new errors.InvalidRequest('"callbackUrl" is invalid or not allowed');
       }
     },
+    backUrl(_ctx, value) {
+      if (value === undefined) return;
+      if (!getSafeCallbackUrl(value)) {
+        throw new errors.InvalidRequest('"backUrl" is invalid or not allowed');
+      }
+    },
   },
   clientBasedCORS(_ctx, origin, client) {
     const normalizedOrigin = normalizeOrigin(origin);
@@ -572,17 +756,62 @@ app.use(helmet({
     directives: {
       'script-src': ["'self'", "'unsafe-inline'", 'https://esm.sh', 'https://unpkg.com'],
       'style-src': ["'self'", "'unsafe-inline'"],
-      'img-src': ["'self'", 'data:', 'https://lh3.googleusercontent.com', 'https://*.googleusercontent.com'],
+      'img-src': ["'self'", 'data:', 'https:', 'http:'],
       'form-action': ['*'],
     },
   },
 }));
 
 const formParser = express.urlencoded({ extended: false });
+const jsonParser = express.json({ limit: '1mb' });
 const web = express.Router();
 
 web.get('/health', (_req, res) => {
   res.json({ ok: true, issuer });
+});
+
+web.use('/me', (req, res, next) => {
+  const origin = normalizeOrigin(req.get('origin') || '');
+  if (origin && allowedOrigins.map(normalizeOrigin).includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, PATCH, OPTIONS');
+  }
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
+
+web.patch('/me', jsonParser, async (req, res) => {
+  const token = await resolveAccessToken(req);
+  if (!token?.accountId) {
+    return res.status(401).json({ error: 'invalid_token' });
+  }
+
+  try {
+    const updated = updateUserProfile(token.accountId, req.body || {});
+    return res.json({
+      sub: updated.id,
+      preferred_username: updated.username || '',
+      email: updated.email || '',
+      picture: updated.picture || '',
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error?.message || 'Invalid profile update' });
+  }
+});
+
+web.use('/app/assets', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
 });
 
 web.use('/app/assets', express.static(join(publicDir, 'assets')));
@@ -591,8 +820,8 @@ web.get(['/', '/app', '/app/callback'], (_req, res) => {
   res.type('html').send(renderTemplate(indexTemplate));
 });
 
-web.get(['/example3', '/example3/callback'], (_req, res) => {
-  res.type('html').send(renderTemplate(example3Template));
+web.get(['/authWidget', '/authWidget/callback'], (_req, res) => {
+  res.type('html').send(renderTemplate(authWidgetTemplate));
 });
 
 web.get('/setup/2fa-qr/:username', async (req, res) => {
@@ -678,8 +907,11 @@ web.get('/setup/runtime-config', (req, res) => {
     twoFactorEnabled: isTwoFactorEnabled(),
     consentEnabled: isConsentEnabled(),
     googleOAuthEnabled: isGoogleOAuthEnabled(),
+    passkeyEnabled: isPasskeyEnabled(),
     confirmLogout: isConfirmLogoutEnabled(),
     googleConfigured,
+    passkeyRpId,
+    passkeyOrigin,
   });
 });
 
@@ -688,8 +920,8 @@ web.post('/setup/runtime-config', formParser, (req, res) => {
   if (!setupToken) return;
 
   if (!Object.hasOwn(req.body, 'twoFactorEnabled')) {
-    if (!Object.hasOwn(req.body, 'consentEnabled') && !Object.hasOwn(req.body, 'googleOAuthEnabled') && !Object.hasOwn(req.body, 'confirmLogout')) {
-      return res.status(400).json({ error: 'twoFactorEnabled or consentEnabled or googleOAuthEnabled or confirmLogout is required' });
+    if (!Object.hasOwn(req.body, 'consentEnabled') && !Object.hasOwn(req.body, 'googleOAuthEnabled') && !Object.hasOwn(req.body, 'passkeyEnabled') && !Object.hasOwn(req.body, 'confirmLogout')) {
+      return res.status(400).json({ error: 'twoFactorEnabled or consentEnabled or googleOAuthEnabled or passkeyEnabled or confirmLogout is required' });
     }
   }
 
@@ -702,6 +934,9 @@ web.post('/setup/runtime-config', formParser, (req, res) => {
   if (Object.hasOwn(req.body, 'googleOAuthEnabled')) {
     runtimeConfig.googleOAuthEnabled = parseBooleanFlag(req.body.googleOAuthEnabled, runtimeConfig.googleOAuthEnabled);
   }
+  if (Object.hasOwn(req.body, 'passkeyEnabled')) {
+    runtimeConfig.passkeyEnabled = parseBooleanFlag(req.body.passkeyEnabled, runtimeConfig.passkeyEnabled);
+  }
   if (Object.hasOwn(req.body, 'confirmLogout')) {
     runtimeConfig.confirmLogout = parseBooleanFlag(req.body.confirmLogout, runtimeConfig.confirmLogout);
   }
@@ -710,9 +945,128 @@ web.post('/setup/runtime-config', formParser, (req, res) => {
     twoFactorEnabled: isTwoFactorEnabled(),
     consentEnabled: isConsentEnabled(),
     googleOAuthEnabled: isGoogleOAuthEnabled(),
+    passkeyEnabled: isPasskeyEnabled(),
     confirmLogout: isConfirmLogoutEnabled(),
     googleConfigured,
+    passkeyRpId,
+    passkeyOrigin,
   });
+});
+
+web.post('/setup/passkeys/:username/options', jsonParser, async (req, res) => {
+  if (!isPasskeyEnabled()) {
+    return res.status(404).json({ error: 'Passkey is disabled' });
+  }
+
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  const username = String(req.params.username || '').trim();
+  const user = findUserByUsername(username);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  if (Array.isArray(user.passkeys) && user.passkeys.length > 0) {
+    clearUserPasskeys(user.id);
+  }
+
+  try {
+    const options = await generateRegistrationOptions({
+      rpName: passkeyRpName,
+      rpID: passkeyRpId,
+      userID: Buffer.from(user.id, 'utf8'),
+      userName: user.username,
+      userDisplayName: user.email || user.username,
+      timeout: 60_000,
+      attestationType: 'none',
+      authenticatorSelection: {
+        residentKey: 'preferred',
+        userVerification: 'preferred',
+      },
+      excludeCredentials: (user.passkeys || []).map((passkey) => ({
+        id: passkey.id,
+        transports: Array.isArray(passkey.transports) ? passkey.transports : [],
+      })),
+    });
+
+    const token = createPasskeyRegistrationSession(username, options.challenge);
+    return res.json({
+      token,
+      publicKey: options,
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error?.message || 'Unable to generate passkey registration options' });
+  }
+});
+
+web.post('/setup/passkeys/:username/verify', jsonParser, async (req, res) => {
+  if (!isPasskeyEnabled()) {
+    return res.status(404).json({ error: 'Passkey is disabled' });
+  }
+
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  const username = String(req.params.username || '').trim();
+  const user = findUserByUsername(username);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const token = String(req.body?.token || '');
+  const credential = req.body?.credential;
+  if (!token || !credential) {
+    return res.status(400).json({ error: 'token and credential are required' });
+  }
+
+  const pending = consumePasskeyRegistrationSession(token, username);
+  if (!pending) {
+    return res.status(401).json({ error: 'Passkey registration session expired' });
+  }
+
+  try {
+    const verification = await verifyRegistrationResponse({
+      response: credential,
+      expectedChallenge: pending.challenge,
+      expectedOrigin: passkeyOrigin,
+      expectedRPID: passkeyRpId,
+      requireUserVerification: false,
+    });
+
+    if (!verification.verified || !verification.registrationInfo) {
+      return res.status(401).json({ error: 'Passkey registration verification failed' });
+    }
+
+    const registrationInfo = verification.registrationInfo;
+    const credentialInfo = registrationInfo.credential || {};
+    const credentialId = toBase64Url(credentialInfo.id || registrationInfo.credentialID);
+    const publicKey = toBase64Url(credentialInfo.publicKey || registrationInfo.credentialPublicKey);
+    const counter = Number(credentialInfo.counter ?? registrationInfo.counter ?? 0);
+    const transports = Array.isArray(credentialInfo.transports) ? credentialInfo.transports : [];
+    const deviceType = registrationInfo.credentialDeviceType || credentialInfo.deviceType || '';
+    const backedUp = Boolean(registrationInfo.credentialBackedUp ?? credentialInfo.backedUp);
+
+    if (!credentialId || !publicKey) {
+      return res.status(400).json({ error: 'Invalid passkey registration payload' });
+    }
+
+    upsertUserPasskey(user.id, {
+      id: credentialId,
+      public_key: publicKey,
+      counter,
+      transports,
+      device_type: deviceType,
+      backed_up: backedUp,
+    });
+
+    return res.json({
+      ok: true,
+      username: user.username,
+      credentialId,
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error?.message || 'Passkey registration verification failed' });
+  }
 });
 
 web.get('/setup/users', (req, res) => {
@@ -836,7 +1190,7 @@ web.get('/interaction/:uid/continue', async (req, res, next) => {
 
     if (!pending) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({
+      res.end(renderLoginPage({
         basePath,
         uid,
         twoFactorEnabled: isTwoFactorEnabled(),
@@ -867,7 +1221,7 @@ web.get('/interaction/:uid/login/google/callback', async (req, res, next) => {
 
     if (!pending) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({
+      res.end(renderLoginPage({
         basePath,
         uid,
         twoFactorEnabled: isTwoFactorEnabled(),
@@ -881,7 +1235,7 @@ web.get('/interaction/:uid/login/google/callback', async (req, res, next) => {
     const user = findUserById(pending.accountId);
     if (!user) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({
+      res.end(renderLoginPage({
         basePath,
         uid,
         twoFactorEnabled: isTwoFactorEnabled(),
@@ -892,14 +1246,20 @@ web.get('/interaction/:uid/login/google/callback', async (req, res, next) => {
       return;
     }
 
+    const isRegisterIntent = pending.mode === 'register';
+
     if (!isTotpRequired(user)) {
+      if (isRegisterIntent && isPasskeyEnabled() && !hasPasskeys(user)) {
+        await renderPasskeyOnboardingForUser(req, res, uid, user);
+        return;
+      }
       await finishLogin(req, res, user.id);
       return;
     }
 
-    const challenge = createTotpChallenge(uid, user.id);
+    const challenge = createTotpChallenge(uid, user.id, isRegisterIntent ? 'register' : 'login');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.end(renderLogin({
+    res.end(renderLoginPage({
       basePath,
       uid,
       twoFactorEnabled: isTwoFactorEnabled(),
@@ -923,10 +1283,12 @@ web.get('/interaction/:uid', async (req, res, next) => {
     const { uid, prompt, params } = details;
 
     if (prompt.name === 'login') {
+      const backUrl = getInteractionBackUrl(params);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({
+      res.end(renderLoginPage({
         basePath,
         uid,
+        backUrl,
         twoFactorEnabled: isTwoFactorEnabled(),
         googleLoginUrl: getGoogleLoginUrl(uid),
         googleRegisterUrl: getGoogleRegisterUrl(uid),
@@ -978,6 +1340,477 @@ web.get('/interaction/:uid', async (req, res, next) => {
   }
 });
 
+web.get('/interaction/:uid/register', async (req, res, next) => {
+  try {
+    const { uid } = req.params;
+    const details = await provider.interactionDetails(req, res);
+    const backUrl = getInteractionBackUrl(details?.params);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(renderRegisterPage({
+      basePath,
+      uid,
+      backUrl,
+      googleRegisterUrl: getGoogleRegisterUrl(uid),
+    }));
+  } catch (err) {
+    if (isMissingInteractionSession(err)) {
+      respondExpiredSession(res);
+      return;
+    }
+    next(err);
+  }
+});
+
+web.post('/interaction/:uid/register', formParser, loginLimiter, async (req, res, next) => {
+  try {
+    const { uid } = req.params;
+    const details = await provider.interactionDetails(req, res);
+    const backUrl = getInteractionBackUrl(details?.params);
+    const username = String(req.body?.username || '').trim();
+    const password = String(req.body?.password || '');
+    const email = String(req.body?.email || '').trim();
+
+    if (!username || !password) {
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(renderRegisterPage({
+        basePath,
+        uid,
+        backUrl,
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+        error: 'Username and password are required',
+        formValues: { username, email },
+      }));
+      return;
+    }
+
+    let user;
+    try {
+      user = await createUser({
+        username,
+        password,
+        email,
+        auth_provider: 'local',
+      });
+    } catch (error) {
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(renderRegisterPage({
+        basePath,
+        uid,
+        backUrl,
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+        error: error?.message || 'Unable to create user',
+        formValues: { username, email },
+      }));
+      return;
+    }
+
+    if (isPasskeyEnabled()) {
+      await renderPasskeyOnboardingForUser(req, res, uid, user);
+      return;
+    }
+
+    await finishLogin(req, res, user.id);
+  } catch (err) {
+    if (isMissingInteractionSession(err)) {
+      respondExpiredSession(res);
+      return;
+    }
+    next(err);
+  }
+});
+
+web.post('/interaction/:uid/passkey/onboarding/options', jsonParser, async (req, res) => {
+  if (!isPasskeyEnabled()) {
+    return res.status(404).json({ error: 'Passkey is disabled' });
+  }
+
+  const { uid } = req.params;
+  const token = String(req.body?.token || '');
+  const pending = getPasskeyOnboardingSession(token, uid);
+  if (!pending) {
+    return res.status(401).json({ error: 'Passkey onboarding session expired' });
+  }
+  const user = findUserById(pending.accountId);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  if (Array.isArray(user.passkeys) && user.passkeys.length > 0) {
+    clearUserPasskeys(user.id);
+  }
+
+  try {
+    const options = await generateRegistrationOptions({
+      rpName: passkeyRpName,
+      rpID: passkeyRpId,
+      userID: Buffer.from(user.id, 'utf8'),
+      userName: user.username,
+      userDisplayName: user.email || user.username,
+      timeout: 60_000,
+      attestationType: 'none',
+      authenticatorSelection: {
+        residentKey: 'preferred',
+        userVerification: 'preferred',
+      },
+      excludeCredentials: (user.passkeys || []).map((passkey) => ({
+        id: passkey.id,
+        transports: Array.isArray(passkey.transports) ? passkey.transports : [],
+      })),
+    });
+    pending.challenge = options.challenge;
+    pending.expiresAt = Date.now() + 5 * 60 * 1000;
+    passkeyOnboardingSessions.set(token, pending);
+    return res.json({ token, publicKey: options });
+  } catch (error) {
+    return res.status(400).json({ error: error?.message || 'Unable to start passkey onboarding' });
+  }
+});
+
+web.post('/interaction/:uid/passkey/onboarding/verify', jsonParser, async (req, res) => {
+  if (!isPasskeyEnabled()) {
+    return res.status(404).json({ error: 'Passkey is disabled' });
+  }
+
+  const { uid } = req.params;
+  const token = String(req.body?.token || '');
+  const credential = req.body?.credential;
+  const pending = getPasskeyOnboardingSession(token, uid);
+  if (!pending) {
+    return res.status(401).json({ error: 'Passkey onboarding session expired' });
+  }
+  const user = findUserById(pending.accountId);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  if (!credential || !pending.challenge) {
+    return res.status(400).json({ error: 'token and credential are required' });
+  }
+
+  try {
+    const verification = await verifyRegistrationResponse({
+      response: credential,
+      expectedChallenge: pending.challenge,
+      expectedOrigin: passkeyOrigin,
+      expectedRPID: passkeyRpId,
+      requireUserVerification: false,
+    });
+
+    if (!verification.verified || !verification.registrationInfo) {
+      return res.status(401).json({ error: 'Passkey registration verification failed' });
+    }
+
+    const registrationInfo = verification.registrationInfo;
+    const credentialInfo = registrationInfo.credential || {};
+    const credentialId = toBase64Url(credentialInfo.id || registrationInfo.credentialID);
+    const publicKey = toBase64Url(credentialInfo.publicKey || registrationInfo.credentialPublicKey);
+    const counter = Number(credentialInfo.counter ?? registrationInfo.counter ?? 0);
+    const transports = Array.isArray(credentialInfo.transports) ? credentialInfo.transports : [];
+    const deviceType = registrationInfo.credentialDeviceType || credentialInfo.deviceType || '';
+    const backedUp = Boolean(registrationInfo.credentialBackedUp ?? credentialInfo.backedUp);
+
+    if (!credentialId || !publicKey) {
+      return res.status(400).json({ error: 'Invalid passkey registration payload' });
+    }
+
+    upsertUserPasskey(user.id, {
+      id: credentialId,
+      public_key: publicKey,
+      counter,
+      transports,
+      device_type: deviceType,
+      backed_up: backedUp,
+    });
+
+    return res.json({
+      ok: true,
+      redirectTo: resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/passkey/onboarding/continue?token=${encodeURIComponent(token)}`),
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error?.message || 'Passkey registration failed' });
+  }
+});
+
+web.get('/interaction/:uid/passkey/onboarding/continue', async (req, res, next) => {
+  try {
+    const { uid } = req.params;
+    const token = String(req.query.token || '');
+    const pending = consumePasskeyOnboardingSession(token, uid);
+    if (!pending) {
+      res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(renderLoginPage({
+        basePath,
+        uid,
+        twoFactorEnabled: isTwoFactorEnabled(),
+        error: 'Passkey onboarding session expired. Sign in again.',
+        googleLoginUrl: getGoogleLoginUrl(uid),
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+      }));
+      return;
+    }
+    await finishLogin(req, res, pending.accountId);
+  } catch (err) {
+    if (isMissingInteractionSession(err)) {
+      respondExpiredSession(res);
+      return;
+    }
+    next(err);
+  }
+});
+
+web.post('/interaction/:uid/passkey/options', jsonParser, async (req, res) => {
+  if (!isPasskeyEnabled()) {
+    return res.status(404).json({ error: 'Passkey is disabled' });
+  }
+
+  const { uid } = req.params;
+  try {
+    await provider.interactionDetails(req, res);
+  } catch {
+    return res.status(401).json({ error: 'Interaction session expired' });
+  }
+
+  const username = String(req.body?.username || '').trim();
+  if (!username) {
+    return res.status(400).json({ error: 'Username is required for passkey sign-in' });
+  }
+
+  const user = findUserByUsername(username);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const allowCredentials = (user.passkeys || []).map((passkey) => ({
+    id: passkey.id,
+    transports: Array.isArray(passkey.transports) ? passkey.transports : [],
+  }));
+
+  if (allowCredentials.length === 0) {
+    return res.status(400).json({ error: `No passkey credentials are registered for ${username}` });
+  }
+
+  const options = await generateAuthenticationOptions({
+    rpID: passkeyRpId,
+    userVerification: 'preferred',
+    timeout: 60_000,
+    allowCredentials,
+  });
+  const token = createPasskeyAuthSession(uid, options.challenge);
+  return res.json({
+    token,
+    publicKey: options,
+  });
+});
+
+web.post('/interaction/:uid/passkey/enroll', jsonParser, loginLimiter, async (req, res) => {
+  if (!isPasskeyEnabled()) {
+    return res.status(404).json({ error: 'Passkey is disabled' });
+  }
+
+  const { uid } = req.params;
+  try {
+    await provider.interactionDetails(req, res);
+  } catch {
+    return res.status(401).json({ error: 'Interaction session expired' });
+  }
+
+  const username = String(req.body?.username || '').trim();
+  const password = String(req.body?.password || '');
+  const otp = String(req.body?.otp || '').trim();
+
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password are required to enroll passkey' });
+  }
+
+  const user = findUserByUsername(username);
+  if (!user || !user.password_hash) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  const passwordOk = await argon2.verify(user.password_hash, password, {
+    type: argon2.argon2id,
+  });
+  if (!passwordOk) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  if (isTotpRequired(user) && !verifyTotpToken(user, otp)) {
+    return res.status(401).json({ error: otp ? 'Invalid verification code' : 'Authenticator code is required' });
+  }
+
+  const token = createPasskeyOnboardingSession(uid, user.id);
+  return res.json({
+    ok: true,
+    redirectTo: resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/passkey/onboarding?token=${encodeURIComponent(token)}`),
+  });
+});
+
+web.get('/interaction/:uid/passkey/onboarding', async (req, res, next) => {
+  try {
+    if (!isPasskeyEnabled()) {
+      res.status(404).send('Passkey is disabled');
+      return;
+    }
+
+    const { uid } = req.params;
+    const token = String(req.query.token || '');
+    const pending = getPasskeyOnboardingSession(token, uid);
+    if (!pending) {
+      res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(renderLoginPage({
+        basePath,
+        uid,
+        twoFactorEnabled: isTwoFactorEnabled(),
+        error: 'Passkey onboarding session expired. Sign in again.',
+        googleLoginUrl: getGoogleLoginUrl(uid),
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+      }));
+      return;
+    }
+
+    const user = findUserById(pending.accountId);
+    if (!user) {
+      res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(renderLoginPage({
+        basePath,
+        uid,
+        twoFactorEnabled: isTwoFactorEnabled(),
+        error: 'Unknown account. Sign in again.',
+        googleLoginUrl: getGoogleLoginUrl(uid),
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+      }));
+      return;
+    }
+
+    const details = await provider.interactionDetails(req, res);
+    const backUrl = getInteractionBackUrl(details?.params);
+    res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(renderPasskeyOnboarding({
+      basePath,
+      uid,
+      token,
+      username: user.username,
+      backUrl,
+    }));
+  } catch (err) {
+    if (isMissingInteractionSession(err)) {
+      respondExpiredSession(res);
+      return;
+    }
+    next(err);
+  }
+});
+
+web.post('/interaction/:uid/passkey/verify', jsonParser, async (req, res) => {
+  if (!isPasskeyEnabled()) {
+    return res.status(404).json({ error: 'Passkey is disabled' });
+  }
+
+  const { uid } = req.params;
+  const token = String(req.body?.token || '');
+  const credential = req.body?.credential;
+  if (!token || !credential) {
+    return res.status(400).json({ error: 'token and credential are required' });
+  }
+
+  const pending = consumePasskeyAuthSession(token, uid);
+  if (!pending) {
+    return res.status(401).json({ error: 'Passkey session expired' });
+  }
+
+  const credentialId = String(credential?.id || '');
+  if (!credentialId) {
+    return res.status(400).json({ error: 'Missing passkey credential id' });
+  }
+
+  const resolved = findPasskeyByCredentialId(credentialId);
+  if (!resolved?.user || !resolved?.passkey) {
+    return res.status(401).json({ error: 'Unknown passkey credential' });
+  }
+
+  try {
+    const verification = await verifyAuthenticationResponse({
+      response: credential,
+      expectedChallenge: pending.challenge,
+      expectedOrigin: passkeyOrigin,
+      expectedRPID: passkeyRpId,
+      credential: {
+        id: resolved.passkey.id,
+        publicKey: fromBase64Url(resolved.passkey.public_key),
+        counter: Number(resolved.passkey.counter || 0),
+        transports: Array.isArray(resolved.passkey.transports) ? resolved.passkey.transports : [],
+      },
+      requireUserVerification: false,
+    });
+
+    if (!verification.verified) {
+      return res.status(401).json({ error: 'Passkey verification failed' });
+    }
+
+    const newCounter = Number(verification.authenticationInfo?.newCounter ?? resolved.passkey.counter ?? 0);
+    touchUserPasskeyCounter(resolved.user.id, resolved.passkey.id, newCounter);
+
+    const completionToken = isTotpRequired(resolved.user)
+      ? createPasskeyCompletionSession(uid, {
+          mode: 'totp',
+          accountId: resolved.user.id,
+          challenge: createTotpChallenge(uid, resolved.user.id),
+        })
+      : createPasskeyCompletionSession(uid, {
+          mode: 'login',
+          accountId: resolved.user.id,
+        });
+
+    return res.json({
+      ok: true,
+      redirectTo: resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/passkey/continue?token=${encodeURIComponent(completionToken)}`),
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error?.message || 'Passkey verification failed' });
+  }
+});
+
+web.get('/interaction/:uid/passkey/continue', async (req, res, next) => {
+  try {
+    const { uid } = req.params;
+    const token = String(req.query.token || '');
+    const pending = consumePasskeyCompletionSession(token, uid);
+    if (!pending) {
+      res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(renderLoginPage({
+        basePath,
+        uid,
+        twoFactorEnabled: isTwoFactorEnabled(),
+        error: 'Passkey session expired. Sign in again.',
+        googleLoginUrl: getGoogleLoginUrl(uid),
+        googleRegisterUrl: getGoogleRegisterUrl(uid),
+      }));
+      return;
+    }
+
+    if (pending.mode === 'totp') {
+      const user = findUserById(pending.accountId);
+      res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(renderLoginPage({
+        basePath,
+        uid,
+        twoFactorEnabled: isTwoFactorEnabled(),
+        username: user?.username || '',
+        googleChallenge: pending.challenge,
+        googleAccountLabel: user?.email || user?.username || '',
+        qrSetupUrl: user ? getInteractionQrSetupUrl(uid, user.id) : '',
+      }));
+      return;
+    }
+
+    await finishLogin(req, res, pending.accountId);
+  } catch (err) {
+    if (isMissingInteractionSession(err)) {
+      respondExpiredSession(res);
+      return;
+    }
+    next(err);
+  }
+});
+
 web.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, next) => {
   try {
     const { uid } = req.params;
@@ -987,7 +1820,7 @@ web.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
       const pending = consumeTotpChallenge(challenge, uid);
       if (!pending) {
         res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.end(renderLogin({
+        res.end(renderLoginPage({
           basePath,
           uid,
           twoFactorEnabled: isTwoFactorEnabled(),
@@ -1001,7 +1834,7 @@ web.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
       const resolvedUser = findUserById(pending.accountId);
       if (!resolvedUser) {
         res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.end(renderLogin({
+        res.end(renderLoginPage({
           basePath,
           uid,
           twoFactorEnabled: isTwoFactorEnabled(),
@@ -1013,9 +1846,9 @@ web.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
       }
 
       if (!verifyTotpToken(resolvedUser, otp)) {
-        const retryChallenge = createTotpChallenge(uid, resolvedUser.id);
+        const retryChallenge = createTotpChallenge(uid, resolvedUser.id, pending.intent || 'login');
         res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.end(renderLogin({
+        res.end(renderLoginPage({
           basePath,
           uid,
           twoFactorEnabled: isTwoFactorEnabled(),
@@ -1029,6 +1862,10 @@ web.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
         return;
       }
 
+      if (pending.intent === 'register' && isPasskeyEnabled() && !hasPasskeys(resolvedUser)) {
+        await renderPasskeyOnboardingForUser(req, res, uid, resolvedUser);
+        return;
+      }
       await finishLogin(req, res, resolvedUser.id);
       return;
     }
@@ -1036,7 +1873,7 @@ web.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
     const user = findUserByUsername(username.trim());
     if (!user || !user.password_hash) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({
+      res.end(renderLoginPage({
         basePath,
         uid,
         twoFactorEnabled: isTwoFactorEnabled(),
@@ -1053,7 +1890,7 @@ web.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
     });
     if (!passwordOk) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({
+      res.end(renderLoginPage({
         basePath,
         uid,
         twoFactorEnabled: isTwoFactorEnabled(),
@@ -1068,7 +1905,7 @@ web.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
     if (isTotpRequired(user)) {
       if (!verifyTotpToken(user, otp)) {
         res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.end(renderLogin({
+        res.end(renderLoginPage({
           basePath,
           uid,
           twoFactorEnabled: isTwoFactorEnabled(),
@@ -1115,7 +1952,7 @@ web.get(googleCallbackRoutePath, async (req, res, next) => {
 
     if (error) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({
+      res.end(renderLoginPage({
         basePath,
         uid,
         twoFactorEnabled: isTwoFactorEnabled(),
@@ -1128,7 +1965,7 @@ web.get(googleCallbackRoutePath, async (req, res, next) => {
 
     if (!code) {
       res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({
+      res.end(renderLoginPage({
         basePath,
         uid,
         twoFactorEnabled: isTwoFactorEnabled(),
@@ -1142,7 +1979,7 @@ web.get(googleCallbackRoutePath, async (req, res, next) => {
     const tokenSet = await exchangeGoogleCode(code);
     const profile = await fetchGoogleProfile(tokenSet.access_token);
     const user = upsertGoogleUser(profile);
-    const callbackToken = createGoogleCallbackSession(uid, user.id);
+    const callbackToken = createGoogleCallbackSession(uid, user.id, pending.mode || 'login');
     res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/login/google/callback?token=${encodeURIComponent(callbackToken)}`));
   } catch (err) {
     console.error('Google callback failed', {
@@ -1158,7 +1995,7 @@ web.get(googleCallbackRoutePath, async (req, res, next) => {
       }
 
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({
+      res.end(renderLoginPage({
         basePath,
         uid,
         twoFactorEnabled: isTwoFactorEnabled(),
@@ -1186,7 +2023,7 @@ web.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, nex
     const pending = consumeTotpChallenge(challenge, uid);
     if (!pending) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({ basePath, uid, twoFactorEnabled: isTwoFactorEnabled(), error: 'Session expired. Sign in again.' }));
+      res.end(renderLoginPage({ basePath, uid, twoFactorEnabled: isTwoFactorEnabled(), error: 'Session expired. Sign in again.' }));
       return;
     }
 
@@ -1194,14 +2031,14 @@ web.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, nex
 
     if (!resolvedUser) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({ basePath, uid, twoFactorEnabled: isTwoFactorEnabled(), error: 'Unknown account. Sign in again.' }));
+      res.end(renderLoginPage({ basePath, uid, twoFactorEnabled: isTwoFactorEnabled(), error: 'Unknown account. Sign in again.' }));
       return;
     }
 
     if (!verifyTotpToken(resolvedUser, otp)) {
-      const retryChallenge = createTotpChallenge(uid, resolvedUser.id);
+      const retryChallenge = createTotpChallenge(uid, resolvedUser.id, pending.intent || 'login');
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLogin({
+      res.end(renderLoginPage({
         basePath,
         uid,
         twoFactorEnabled: isTwoFactorEnabled(),
@@ -1212,6 +2049,11 @@ web.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, nex
         googleAccountLabel: resolvedUser.email || resolvedUser.username,
         qrSetupUrl: getInteractionQrSetupUrl(uid, resolvedUser.id),
       }));
+      return;
+    }
+
+    if (pending.intent === 'register' && isPasskeyEnabled() && !hasPasskeys(resolvedUser)) {
+      await renderPasskeyOnboardingForUser(req, res, uid, resolvedUser);
       return;
     }
 

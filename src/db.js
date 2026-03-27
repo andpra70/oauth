@@ -17,13 +17,13 @@ function buildDefaultClientUrls() {
   const basePath = normalizeBasePath(process.env.BASE_PATH || issuerUrl.pathname);
   const baseUrl = new URL(basePath ? `${basePath}/` : '/', issuerUrl.origin);
   const callbackApp = new URL('app/callback', baseUrl).toString();
-  const callbackExample3 = new URL('example3/callback', baseUrl).toString();
+  const callbackAuthWidget = new URL('authWidget/callback', baseUrl).toString();
   const postLogoutApp = new URL('app', baseUrl).toString();
-  const postLogoutExample3 = new URL('example3', baseUrl).toString();
+  const postLogoutAuthWidget = new URL('authWidget', baseUrl).toString();
 
   return {
-    redirectUris: `${callbackApp},${callbackExample3}`,
-    postLogoutRedirectUris: `${postLogoutApp},${postLogoutExample3}`,
+    redirectUris: `${callbackApp},${callbackAuthWidget}`,
+    postLogoutRedirectUris: `${postLogoutApp},${postLogoutAuthWidget}`,
   };
 }
 
@@ -46,7 +46,12 @@ function loadState() {
 
   const parsed = JSON.parse(raw);
   return {
-    users: Array.isArray(parsed.users) ? parsed.users : [],
+    users: Array.isArray(parsed.users)
+      ? parsed.users.map((user) => ({
+          ...user,
+          passkeys: Array.isArray(user?.passkeys) ? user.passkeys : [],
+        }))
+      : [],
     oauth_clients: Array.isArray(parsed.oauth_clients) ? parsed.oauth_clients : [],
   };
 }
@@ -193,6 +198,23 @@ export function findUserById(id) {
   return state.users.find((user) => user.id === id);
 }
 
+export function findUserByPasskeyCredentialId(credentialId) {
+  const target = String(credentialId || '');
+  if (!target) return null;
+  const state = loadState();
+  return state.users.find((user) => (user.passkeys || []).some((item) => item.id === target));
+}
+
+export function findPasskeyByCredentialId(credentialId) {
+  const target = String(credentialId || '');
+  if (!target) return null;
+  const user = findUserByPasskeyCredentialId(target);
+  if (!user) return null;
+  const passkey = (user.passkeys || []).find((item) => item.id === target);
+  if (!passkey) return null;
+  return { user, passkey };
+}
+
 export function listUsers() {
   const state = loadState();
   return [...state.users].sort((left, right) => {
@@ -260,6 +282,7 @@ export async function createUser(input) {
     id: newId('usr'),
     ...payload,
     totp_secret: secret.base32,
+    passkeys: [],
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -300,6 +323,60 @@ export async function updateUser(id, input) {
     }
     state.users[index].password_hash = await hashPassword(password);
   }
+
+  saveState(state);
+  return state.users[index];
+}
+
+export function updateUserProfile(id, input) {
+  const state = loadState();
+  const index = state.users.findIndex((user) => user.id === id);
+  if (index < 0) {
+    throw new Error('User not found');
+  }
+
+  const payload = (input && typeof input === 'object') ? input : {};
+  const allowedKeys = new Set(['preferred_username', 'email', 'picture']);
+  const providedKeys = Object.keys(payload);
+  const forbiddenKey = providedKeys.find((key) => !allowedKeys.has(key));
+  if (forbiddenKey) {
+    throw new Error(`Field "${forbiddenKey}" is not editable`);
+  }
+
+  const existing = state.users[index];
+  const nextUsername = Object.hasOwn(payload, 'preferred_username')
+    ? String(payload.preferred_username || '').trim()
+    : existing.username;
+  const nextEmail = Object.hasOwn(payload, 'email')
+    ? (normalizeEmail(payload.email || '') || null)
+    : (existing.email || null);
+  const nextPicture = Object.hasOwn(payload, 'picture')
+    ? (String(payload.picture || '').trim() || null)
+    : (existing.picture || null);
+
+  if (!nextUsername) {
+    throw new Error('preferred_username is required');
+  }
+
+  const duplicateUsername = state.users.find((user) => user.id !== existing.id && user.username === nextUsername);
+  if (duplicateUsername) {
+    throw new Error('Username already exists');
+  }
+
+  if (nextEmail) {
+    const duplicateEmail = state.users.find((user) => user.id !== existing.id && normalizeEmail(user.email) === nextEmail);
+    if (duplicateEmail) {
+      throw new Error('Email already exists');
+    }
+  }
+
+  state.users[index] = {
+    ...existing,
+    username: nextUsername,
+    email: nextEmail,
+    picture: nextPicture,
+    updated_at: nowIso(),
+  };
 
   saveState(state);
   return state.users[index];
@@ -350,6 +427,9 @@ export function upsertGoogleUser(profile) {
     }
     existing.totp_enabled = 1;
     existing.updated_at = timestamp;
+    if (!Array.isArray(existing.passkeys)) {
+      existing.passkeys = [];
+    }
     saveState(state);
     return existing;
   }
@@ -364,6 +444,7 @@ export function upsertGoogleUser(profile) {
     google_subject: googleSubject,
     totp_secret: secret.base32,
     totp_enabled: 1,
+    passkeys: [],
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -391,4 +472,81 @@ export function getClients() {
       token_endpoint_auth_method: tokenEndpointAuthMethod,
     };
   });
+}
+
+export function upsertUserPasskey(userId, input) {
+  const state = loadState();
+  const index = state.users.findIndex((user) => user.id === userId);
+  if (index < 0) {
+    throw new Error('User not found');
+  }
+
+  const credentialId = String(input?.id || '').trim();
+  if (!credentialId) {
+    throw new Error('Passkey credential id is required');
+  }
+
+  const entry = {
+    id: credentialId,
+    public_key: String(input?.public_key || ''),
+    counter: Number(input?.counter || 0),
+    transports: Array.isArray(input?.transports) ? input.transports : [],
+    device_type: String(input?.device_type || ''),
+    backed_up: Boolean(input?.backed_up),
+    created_at: String(input?.created_at || nowIso()),
+    updated_at: nowIso(),
+    last_used_at: input?.last_used_at ? String(input.last_used_at) : null,
+  };
+
+  if (!Array.isArray(state.users[index].passkeys)) {
+    state.users[index].passkeys = [];
+  }
+
+  const existingIndex = state.users[index].passkeys.findIndex((item) => item.id === credentialId);
+  if (existingIndex >= 0) {
+    state.users[index].passkeys[existingIndex] = {
+      ...state.users[index].passkeys[existingIndex],
+      ...entry,
+      created_at: state.users[index].passkeys[existingIndex].created_at || entry.created_at,
+    };
+  } else {
+    state.users[index].passkeys.push(entry);
+  }
+
+  state.users[index].updated_at = nowIso();
+  saveState(state);
+  return state.users[index];
+}
+
+export function touchUserPasskeyCounter(userId, credentialId, counter) {
+  const state = loadState();
+  const userIndex = state.users.findIndex((item) => item.id === userId);
+  if (userIndex < 0) {
+    throw new Error('User not found');
+  }
+  const passkeys = Array.isArray(state.users[userIndex].passkeys) ? state.users[userIndex].passkeys : [];
+  const passkeyIndex = passkeys.findIndex((item) => item.id === credentialId);
+  if (passkeyIndex < 0) {
+    throw new Error('Passkey not found');
+  }
+
+  passkeys[passkeyIndex].counter = Number(counter || 0);
+  passkeys[passkeyIndex].last_used_at = nowIso();
+  passkeys[passkeyIndex].updated_at = nowIso();
+  state.users[userIndex].passkeys = passkeys;
+  state.users[userIndex].updated_at = nowIso();
+  saveState(state);
+  return state.users[userIndex];
+}
+
+export function clearUserPasskeys(userId) {
+  const state = loadState();
+  const userIndex = state.users.findIndex((item) => item.id === userId);
+  if (userIndex < 0) {
+    throw new Error('User not found');
+  }
+  state.users[userIndex].passkeys = [];
+  state.users[userIndex].updated_at = nowIso();
+  saveState(state);
+  return state.users[userIndex];
 }

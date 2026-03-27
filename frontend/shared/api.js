@@ -1,18 +1,6 @@
 const appConfig = window.__APP_CONFIG__ || {};
 const baseUrl = new URL(appConfig.baseHref || document.baseURI, window.location.origin);
 
-export function getAppConfig() {
-  return appConfig;
-}
-
-export function getBaseUrl() {
-  return baseUrl;
-}
-
-export function appUrl(path = '') {
-  return new URL(String(path).replace(/^\/+/, ''), baseUrl).toString();
-}
-
 export function appPath(path = '') {
   return new URL(String(path).replace(/^\/+/, ''), baseUrl).pathname;
 }
