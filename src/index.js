@@ -11,9 +11,9 @@ import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import { Provider, errors } from 'oidc-provider';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
-import { clearUserPasskeys, createUser, deleteUser, ensureClientPostLogoutRedirectUri, ensureClientRedirectUri, ensureSchema, findPasskeyByCredentialId, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, touchUserPasskeyCounter, updateUser, updateUserProfile, upsertGoogleUser, upsertUserPasskey } from './db.js';
+import { clearUserPasskeys, createUser, deleteUser, ensureClientPostLogoutRedirectUri, ensureClientRedirectUri, ensureSchema, findPasskeyByCredentialId, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, touchUserPasskeyCounter, updateClientRedirectUris, updateUser, updateUserProfile, upsertGoogleUser, upsertUserPasskey } from './db.js';
 import { findAccount } from './account.js';
-import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderOidcSessionsAdmin, renderPasskeyOnboarding, renderProviderError, renderRegister, renderTotpQrSetup, renderUsersAdmin } from './html.js';
+import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderOidcSessionsAdmin, renderPasskeyOnboarding, renderProviderError, renderRedirectConfigAdmin, renderRegister, renderTotpQrSetup, renderUsersAdmin } from './html.js';
 import { ensureOidcStore, JsonAdapter, listOidcStoreOverview, removeOidcRecord, revokeOidcByGrantId, revokeOidcBySessionUid } from './oidc-adapter.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1170,6 +1170,41 @@ function renderOidcSessionsPage(res, setupToken, {
   }));
 }
 
+function parseUriTextarea(value) {
+  return String(value || '')
+    .split(/\r?\n|,/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function renderRedirectConfigPage(res, setupToken, {
+  selectedClientId = '',
+  notice = '',
+  error = '',
+  formValues = {},
+} = {}) {
+  const clients = getClients();
+  const selectedClient = clients.find((client) => client.client_id === selectedClientId) || clients[0] || null;
+  const values = {
+    redirect_uris: Array.isArray(formValues.redirect_uris)
+      ? formValues.redirect_uris.join('\n')
+      : (formValues.redirect_uris ?? (selectedClient?.redirect_uris || []).join('\n')),
+    post_logout_redirect_uris: Array.isArray(formValues.post_logout_redirect_uris)
+      ? formValues.post_logout_redirect_uris.join('\n')
+      : (formValues.post_logout_redirect_uris ?? (selectedClient?.post_logout_redirect_uris || []).join('\n')),
+  };
+
+  res.type('html').send(renderRedirectConfigAdmin({
+    basePath,
+    setupToken,
+    clients,
+    selectedClientId: selectedClient?.client_id || '',
+    values,
+    notice,
+    error,
+  }));
+}
+
 web.get('/setup/oidc-sessions', (req, res) => {
   const setupToken = requireSetupToken(req, res);
   if (!setupToken) return;
@@ -1198,6 +1233,42 @@ web.post('/setup/oidc-sessions/grant/:id/revoke', (req, res) => {
   }
   const deleted = revokeOidcByGrantId(grantId);
   renderOidcSessionsPage(res, setupToken, { notice: `Grant ${grantId} revoked (${deleted} records removed).` });
+});
+
+web.get('/setup/config', (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+  const selectedClientId = String(req.query.client_id || '').trim();
+  renderRedirectConfigPage(res, setupToken, { selectedClientId });
+});
+
+web.post('/setup/config', formParser, (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  const clientId = String(req.body.client_id || '').trim();
+  const redirectUris = parseUriTextarea(req.body.redirect_uris);
+  const postLogoutRedirectUris = parseUriTextarea(req.body.post_logout_redirect_uris);
+
+  try {
+    updateClientRedirectUris(clientId, {
+      redirectUris,
+      postLogoutRedirectUris,
+    });
+    renderRedirectConfigPage(res, setupToken, {
+      selectedClientId: clientId,
+      notice: `Client ${clientId} updated`,
+    });
+  } catch (error) {
+    renderRedirectConfigPage(res, setupToken, {
+      selectedClientId: clientId,
+      error: error?.message || 'Unable to update redirect URI configuration',
+      formValues: {
+        redirect_uris: redirectUris,
+        post_logout_redirect_uris: postLogoutRedirectUris,
+      },
+    });
+  }
 });
 
 web.post('/setup/passkeys/:username/options', jsonParser, async (req, res) => {

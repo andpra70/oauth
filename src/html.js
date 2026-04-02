@@ -70,6 +70,10 @@ export function renderOidcSessionsAdmin(props = {}) {
   return renderPage({ title: 'OIDC sessions', view: 'oidc_sessions_admin', payload: props });
 }
 
+export function renderRedirectConfigAdmin(props = {}) {
+  return renderPage({ title: 'OIDC redirect configuration', view: 'redirect_config_admin', payload: props });
+}
+
 export function renderProviderError(props = {}) {
   return renderPage({ title: 'OAuth error', view: 'provider_error', payload: props });
 }
