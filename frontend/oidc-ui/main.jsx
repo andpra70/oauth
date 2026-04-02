@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import UsersAdminView from './components/UsersAdminView.jsx';
+import OidcSessionsAdminView from './components/OidcSessionsAdminView.jsx';
 
 const OIDC_UI_STYLE = `
 :root{color-scheme:dark}*{box-sizing:border-box}body{font-family:system-ui,sans-serif;max-width:460px;margin:40px auto;padding:0 16px;background:#0f172a;color:#e2e8f0}.box{border:1px solid #334155;border-radius:12px;padding:20px;background:#111827}label{display:block;margin-top:12px;font-size:14px}input,select{width:100%;margin-top:6px;padding:10px;border-radius:8px;border:1px solid #475569;background:#0b1220;color:#e2e8f0}button,.button-link{margin-top:16px;width:100%;padding:10px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;box-sizing:border-box;text-align:center;display:block;text-decoration:none}.secondary{background:#374151}.error{color:#fca5a5;margin-top:12px;font-size:14px}.hint{color:#94a3b8;font-size:13px;margin-top:8px}a{color:#93c5fd}.actions{display:grid;gap:8px;margin-top:16px}.separator{margin:20px 0 8px;color:#94a3b8;font-size:13px;text-align:center}.auth-grid{display:grid;grid-template-columns:1fr;gap:16px;align-items:start}.qr-panel{border:1px solid #334155;border-radius:12px;padding:12px;background:#0b1220}pre{margin:0;padding:12px;border-radius:12px;background:#111827;color:#e2e8f0;white-space:pre-wrap;word-break:break-word}body:has(.admin-main){max-width:none}.admin-main{width:min(1180px,calc(100% - 32px));margin:24px auto;display:grid;gap:16px}.shell{display:grid;grid-template-columns:320px minmax(0,1fr);gap:16px;align-items:start}.panel{border:1px solid #334155;background:#111827;padding:18px}.topbar{display:flex;justify-content:space-between;gap:12px;align-items:center}.muted{color:#94a3b8}.list{display:grid;gap:8px;margin-top:16px}.user-link{display:grid;gap:2px;padding:10px 12px;text-decoration:none;color:#e2e8f0;border:1px solid #334155;background:#0b1220}.user-link.active{border-color:#60a5fa;background:#172033}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:16px}.field{display:grid;gap:6px}.field.full{grid-column:1/-1}.message{margin-top:12px;padding:10px 12px;border:1px solid #334155;background:#0b1220}.message.error{border-color:#7f1d1d;color:#fecaca}.meta{display:grid;gap:6px;margin-top:16px;color:#94a3b8;font-size:13px}.danger{background:#991b1b}@media (min-width:860px){.box{max-width:920px;margin:0 auto}}@media (max-width:860px){.shell{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
@@ -437,109 +439,28 @@ function TotpQrSetupView({ payload }) {
   );
 }
 
-function UsersAdminView({ payload }) {
+function ProviderErrorView({ payload }) {
   const {
+    error = 'server_error',
+    error_description: errorDescription = 'oops! something went wrong',
+    state = '',
+    iss = '',
     basePath = '',
-    setupToken = '',
-    users = [],
-    selectedUser = null,
-    formValues = {},
-    error = '',
-    notice = '',
-    isNew = false,
   } = payload || {};
 
-  const tokenQuery = useMemo(() => `?token=${encodeURIComponent(setupToken)}`, [setupToken]);
-  const current = selectedUser || null;
-  const values = {
-    username: formValues.username ?? current?.username ?? '',
-    email: formValues.email ?? current?.email ?? '',
-    auth_provider: formValues.auth_provider ?? current?.auth_provider ?? 'local',
-    picture: formValues.picture ?? current?.picture ?? '',
-    google_subject: formValues.google_subject ?? current?.google_subject ?? '',
-    totp_enabled: String(formValues.totp_enabled ?? current?.totp_enabled ?? '0') === '1' ? '1' : '0',
-  };
-  const formAction = isNew
-    ? resolvePath(basePath, `/setup/users${tokenQuery}`)
-    : resolvePath(basePath, `/setup/users/${encodeURIComponent(current?.id || '')}${tokenQuery}`);
-
   return (
-    <main className="admin-main">
-      <section className="panel topbar">
-        <div>
-          <h1>User management</h1>
-          <p className="muted">Create, inspect, edit and delete users stored in the JSON database.</p>
-        </div>
-        <div className="actions">
-          <a className="button-link secondary" href={resolvePath(basePath, `/setup/users/new${tokenQuery}`)}>Add user</a>
-          <a className="button-link secondary" href={resolvePath(basePath, '/app')}>Back to app</a>
-        </div>
-      </section>
-      <section className="shell">
-        <aside className="panel">
-          <h2>Users</h2>
-          <p className="muted" style={{ marginTop: '6px' }}>{users.length} total</p>
-          <div className="list">
-            {users.length === 0 ? <p className="muted" style={{ marginTop: '12px' }}>No users found.</p> : users.map((user) => {
-              const isActive = current?.id === user.id && !isNew;
-              const label = user.email || user.username || user.id;
-              return (
-                <a key={user.id} className={`user-link${isActive ? ' active' : ''}`} href={resolvePath(basePath, `/setup/users/${encodeURIComponent(user.id)}${tokenQuery}`)}>
-                  <strong>{user.username || user.id}</strong>
-                  <span>{label}</span>
-                </a>
-              );
-            })}
-          </div>
-        </aside>
-        <section className="panel">
-          <h2>{isNew ? 'Add user' : 'User detail'}</h2>
-          {notice ? <div className="message">{notice}</div> : null}
-          {error ? <div className="message error">{error}</div> : null}
-          <form method="post" action={formAction}>
-            <div className="form-grid">
-              <div className="field"><label>Username</label><input name="username" required defaultValue={values.username} /></div>
-              <div className="field"><label>Email</label><input name="email" type="email" defaultValue={values.email} /></div>
-              <div className="field">
-                <label>Auth provider</label>
-                <select name="auth_provider" defaultValue={values.auth_provider}>
-                  <option value="local">local</option>
-                  <option value="google">google</option>
-                </select>
-              </div>
-              <div className="field">
-                <label>TOTP enabled</label>
-                <select name="totp_enabled" defaultValue={values.totp_enabled}>
-                  <option value="0">No</option>
-                  <option value="1">Yes</option>
-                </select>
-              </div>
-              <div className="field full"><label>Password {isNew ? '(required, min 12 chars for local users)' : '(leave empty to keep current)'}</label><input name="password" type="password" /></div>
-              <div className="field full"><label>Google subject</label><input name="google_subject" defaultValue={values.google_subject} /></div>
-              <div className="field full"><label>Picture URL</label><input name="picture" defaultValue={values.picture} /></div>
-            </div>
-            <div className="actions">
-              <button type="submit">{isNew ? 'Create user' : 'Save changes'}</button>
-              {!isNew ? <a className="button-link secondary" href={resolvePath(basePath, `/setup/users/new${tokenQuery}`)}>New user</a> : null}
-            </div>
-          </form>
-          {current ? (
-            <form method="post" action={resolvePath(basePath, `/setup/users/${encodeURIComponent(current.id)}/delete${tokenQuery}`)} onSubmit={(event) => {
-              if (!window.confirm(`Delete user ${current.username || current.id}?`)) event.preventDefault();
-            }}>
-              <button className="secondary danger" type="submit">Delete user</button>
-            </form>
-          ) : null}
-          {current ? (
-            <div className="meta">
-              <div><strong>ID:</strong> {current.id || ''}</div>
-              <div><strong>Created:</strong> {current.created_at || ''}</div>
-              <div><strong>Updated:</strong> {current.updated_at || ''}</div>
-            </div>
-          ) : null}
-        </section>
-      </section>
-    </main>
+    <div className="box">
+      <h2>Oops! something went wrong</h2>
+      <div className="meta">
+        <div><strong>error:</strong> {String(error || '') || '-'}</div>
+        <div><strong>error_description:</strong> {String(errorDescription || '') || '-'}</div>
+        {state ? <div><strong>state:</strong> {state}</div> : null}
+        {iss ? <div><strong>iss:</strong> {iss}</div> : null}
+      </div>
+      <div className="actions">
+        <a className="button-link secondary" href={resolvePath(basePath, '/app')}>Back to app</a>
+      </div>
+    </div>
   );
 }
 
@@ -570,7 +491,9 @@ function OidcUiApp() {
     case 'logout_success': return <LogoutSuccessView payload={payload} />;
     case 'logout_autosubmit': return <LogoutAutosubmitView payload={payload} />;
     case 'totp_qr_setup': return <TotpQrSetupView payload={payload} />;
-    case 'users_admin': return <UsersAdminView payload={payload} />;
+    case 'provider_error': return <ProviderErrorView payload={payload} />;
+    case 'users_admin': return <UsersAdminView payload={payload} resolvePath={resolvePath} />;
+    case 'oidc_sessions_admin': return <OidcSessionsAdminView payload={payload} resolvePath={resolvePath} />;
     default: return <UnsupportedView view={view} />;
   }
 }

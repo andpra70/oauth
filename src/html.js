@@ -65,3 +65,11 @@ export function renderTotpQrSetup(props = {}) {
 export function renderUsersAdmin(props = {}) {
   return renderPage({ title: 'User management', view: 'users_admin', payload: props });
 }
+
+export function renderOidcSessionsAdmin(props = {}) {
+  return renderPage({ title: 'OIDC sessions', view: 'oidc_sessions_admin', payload: props });
+}
+
+export function renderProviderError(props = {}) {
+  return renderPage({ title: 'OAuth error', view: 'provider_error', payload: props });
+}

@@ -13,8 +13,8 @@ import { Provider, errors } from 'oidc-provider';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { clearUserPasskeys, createUser, deleteUser, ensureClientPostLogoutRedirectUri, ensureClientRedirectUri, ensureSchema, findPasskeyByCredentialId, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, touchUserPasskeyCounter, updateUser, updateUserProfile, upsertGoogleUser, upsertUserPasskey } from './db.js';
 import { findAccount } from './account.js';
-import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderPasskeyOnboarding, renderRegister, renderTotpQrSetup, renderUsersAdmin } from './html.js';
-import { ensureOidcStore, JsonAdapter } from './oidc-adapter.js';
+import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderOidcSessionsAdmin, renderPasskeyOnboarding, renderProviderError, renderRegister, renderTotpQrSetup, renderUsersAdmin } from './html.js';
+import { ensureOidcStore, JsonAdapter, listOidcStoreOverview, removeOidcRecord, revokeOidcByGrantId, revokeOidcBySessionUid } from './oidc-adapter.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(__dirname, '..', 'public');
@@ -38,6 +38,7 @@ const runtimeConfig = {
 };
 const indexTemplate = readFileSync(join(publicDir, 'index.html'), 'utf8');
 const authWidgetTemplate = readFileSync(join(publicDir, 'authWidget.html'), 'utf8');
+const flowDiagramTemplate = readFileSync(join(publicDir, 'flowDiagram.html'), 'utf8');
 
 function normalizeBasePath(value) {
   const raw = String(value || '').trim();
@@ -97,6 +98,8 @@ function inferRequestProtocol(req) {
   if (hostPort === 443 || hostPort === 55443) return 'https';
 
   if (req.socket?.encrypted) return 'https';
+  const reqProtocol = String(req.protocol || '').toLowerCase();
+  if (reqProtocol === 'http' || reqProtocol === 'https') return reqProtocol;
   return issuerUrl.protocol.replace(':', '') || 'http';
 }
 
@@ -807,6 +810,18 @@ const provider = new Provider(issuer, {
       return resolvePath(basePath, `/interaction/${interaction.uid}`);
     },
   },
+  renderError(ctx, out, defaultError) {
+    const payload = {
+      basePath,
+      error: out?.error || defaultError?.error || 'server_error',
+      error_description: out?.error_description || defaultError?.error_description || defaultError?.message || 'oops! something went wrong',
+      state: out?.state || '',
+      iss: out?.iss || issuer,
+    };
+    ctx.type = 'html';
+    ctx.status = Number(out?.statusCode || defaultError?.status || 500);
+    ctx.body = renderProviderError(payload);
+  },
   extraParams: {
     callbackUrl(_ctx, value) {
       if (value === undefined) return;
@@ -960,6 +975,10 @@ web.get(['/authWidget', '/authWidget/callback'], (_req, res) => {
   res.type('html').send(renderTemplate(authWidgetTemplate));
 });
 
+web.get('/flow-diagram', (_req, res) => {
+  res.type('html').send(renderTemplate(flowDiagramTemplate));
+});
+
 web.get('/setup/2fa-qr/:username', async (req, res) => {
   if (!isTwoFactorEnabled()) {
     return res.status(404).json({ error: '2FA is disabled' });
@@ -1087,6 +1106,98 @@ web.post('/setup/runtime-config', formParser, (req, res) => {
     passkeyRpId: getPasskeyRpId(req),
     passkeyOrigin: getPasskeyOrigin(req),
   });
+});
+
+web.get('/setup/oidc-store', (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+  res.json(listOidcStoreOverview());
+});
+
+web.post('/setup/oidc-store/session/:uid/revoke', (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  const uid = String(req.params.uid || '').trim();
+  if (!uid) {
+    res.status(400).json({ error: 'session uid is required' });
+    return;
+  }
+
+  const deleted = revokeOidcBySessionUid(uid);
+  res.json({ ok: true, deleted });
+});
+
+web.post('/setup/oidc-store/grant/:id/revoke', (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  const grantId = String(req.params.id || '').trim();
+  if (!grantId) {
+    res.status(400).json({ error: 'grant id is required' });
+    return;
+  }
+
+  const deleted = revokeOidcByGrantId(grantId);
+  res.json({ ok: true, deleted });
+});
+
+web.post('/setup/oidc-store/record/delete', jsonParser, (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  const model = String(req.body?.model || '').trim();
+  const id = String(req.body?.id || '').trim();
+  if (!model || !id) {
+    res.status(400).json({ error: 'model and id are required' });
+    return;
+  }
+
+  const removed = removeOidcRecord(model, id);
+  res.json({ ok: true, removed });
+});
+
+function renderOidcSessionsPage(res, setupToken, {
+  notice = '',
+  error = '',
+} = {}) {
+  res.type('html').send(renderOidcSessionsAdmin({
+    basePath,
+    setupToken,
+    store: listOidcStoreOverview(),
+    notice,
+    error,
+  }));
+}
+
+web.get('/setup/oidc-sessions', (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+  renderOidcSessionsPage(res, setupToken);
+});
+
+web.post('/setup/oidc-sessions/session/:uid/revoke', (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+  const uid = String(req.params.uid || '').trim();
+  if (!uid) {
+    renderOidcSessionsPage(res, setupToken, { error: 'Session UID is required' });
+    return;
+  }
+  const deleted = revokeOidcBySessionUid(uid);
+  renderOidcSessionsPage(res, setupToken, { notice: `Session ${uid} revoked (${deleted} records removed).` });
+});
+
+web.post('/setup/oidc-sessions/grant/:id/revoke', (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+  const grantId = String(req.params.id || '').trim();
+  if (!grantId) {
+    renderOidcSessionsPage(res, setupToken, { error: 'Grant ID is required' });
+    return;
+  }
+  const deleted = revokeOidcByGrantId(grantId);
+  renderOidcSessionsPage(res, setupToken, { notice: `Grant ${grantId} revoked (${deleted} records removed).` });
 });
 
 web.post('/setup/passkeys/:username/options', jsonParser, async (req, res) => {
@@ -2266,32 +2377,94 @@ web.post('/interaction/:uid/abort', formParser, async (req, res, next) => {
 });
 
 function canAutoRegisterClientUri(req, rawUri) {
-  const uriOrigin = normalizeOrigin(rawUri);
-  if (!uriOrigin) return false;
-  if (allowedOriginSet.has(uriOrigin)) return true;
-  const requestOrigin = getRequestOrigin(req);
-  return Boolean(requestOrigin) && uriOrigin === requestOrigin;
+  try {
+    let uri;
+    try {
+      uri = new URL(String(rawUri || ''));
+    } catch {
+      return false;
+    }
+
+    const uriOrigin = uri.origin;
+    if (allowedOriginSet.has(uriOrigin)) return true;
+
+    const requestOrigin = getRequestOrigin(req);
+    if (requestOrigin && uriOrigin === requestOrigin) return true;
+
+    const requestHost = String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim().toLowerCase();
+    const uriHost = String(uri.host || '').trim().toLowerCase();
+    if (requestHost && uriHost && requestHost === uriHost) return true;
+
+    const requestHostname = requestHost.includes(':') ? requestHost.split(':')[0] : requestHost;
+    const uriHostname = String(uri.hostname || '').trim().toLowerCase();
+    if (requestHostname && uriHostname && requestHostname === uriHostname) return true;
+
+    const allowedHosts = new Set(
+      [...allowedOriginSet]
+        .map((origin) => hostFromUrl(origin).toLowerCase())
+        .filter(Boolean),
+    );
+    if (allowedHosts.has(uriHost)) return true;
+
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 web.use('/auth', (req, _res, next) => {
+  const requestOrigin = getRequestOrigin(req);
+  if (requestOrigin && requestOrigin !== issuerUrl.origin) {
+    const canonicalAuthUrl = new URL(resolvePath(basePath, '/auth'), `${issuerUrl.origin}/`);
+    const rawQuery = String(req.url || '').split('?')[1] || '';
+    if (rawQuery) canonicalAuthUrl.search = rawQuery;
+    _res.redirect(307, canonicalAuthUrl.toString());
+    return;
+  }
+
   const clientId = String(req.query.client_id || '').trim();
   const redirectUri = String(req.query.redirect_uri || '').trim();
   if (!clientId || !redirectUri || !canAutoRegisterClientUri(req, redirectUri)) {
     next();
     return;
   }
-  ensureClientRedirectUri(clientId, redirectUri);
+  try {
+    ensureClientRedirectUri(clientId, redirectUri);
+  } catch (error) {
+    console.warn('Auto-register redirect_uri failed', {
+      clientId,
+      redirectUri,
+      message: error?.message,
+    });
+  }
   next();
 });
 
 web.use('/session/end', (req, _res, next) => {
+  const requestOrigin = getRequestOrigin(req);
+  if (requestOrigin && requestOrigin !== issuerUrl.origin) {
+    const canonicalSessionEndUrl = new URL(resolvePath(basePath, '/session/end'), `${issuerUrl.origin}/`);
+    const rawQuery = String(req.url || '').split('?')[1] || '';
+    if (rawQuery) canonicalSessionEndUrl.search = rawQuery;
+    _res.redirect(307, canonicalSessionEndUrl.toString());
+    return;
+  }
+
   const clientId = String(req.query.client_id || '').trim();
   const postLogoutRedirectUri = String(req.query.post_logout_redirect_uri || '').trim();
   if (!clientId || !postLogoutRedirectUri || !canAutoRegisterClientUri(req, postLogoutRedirectUri)) {
     next();
     return;
   }
-  ensureClientPostLogoutRedirectUri(clientId, postLogoutRedirectUri);
+  try {
+    ensureClientPostLogoutRedirectUri(clientId, postLogoutRedirectUri);
+  } catch (error) {
+    console.warn('Auto-register post_logout_redirect_uri failed', {
+      clientId,
+      postLogoutRedirectUri,
+      message: error?.message,
+    });
+  }
   next();
 });
 

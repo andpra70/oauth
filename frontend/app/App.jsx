@@ -334,6 +334,20 @@ export default function App() {
     window.location.assign(url);
   }
 
+  function openOidcSessionsAdmin() {
+    if (!config.setupToken) {
+      setStatus({ type: 'error', message: 'Setup token obbligatorio per aprire la gestione sessioni OIDC.' });
+      return;
+    }
+    const url = new URL(issuerEndpoint(config.issuer || getDefaults().issuer, 'setup/oidc-sessions'));
+    url.searchParams.set('token', config.setupToken);
+    window.location.assign(url);
+  }
+
+  function openFlowDiagram() {
+    window.location.assign(issuerEndpoint(config.issuer || getDefaults().issuer, 'flow-diagram'));
+  }
+
   return (
     <main>
       <section className="hero">
@@ -387,6 +401,8 @@ export default function App() {
             <button className="secondary" onClick={loadQr} disabled={busyAction === 'qr'}>Mostra QR TOTP</button>
             <button className="secondary" onClick={registerPasskey} disabled={busyAction === 'passkey'}>Registra/Resetta Passkey</button>
             <button className="secondary" onClick={openUsersAdmin}>Gestione utenti</button>
+            <button className="secondary" onClick={openOidcSessionsAdmin}>Gestione sessioni OIDC</button>
+            <button className="secondary" onClick={openFlowDiagram}>Mappa flussi OAuth</button>
             <button className="ghost" onClick={openAuthWidget}>Apri AuthWidget</button>
             <button className="ghost" onClick={clearState}>Pulisci sessione</button>
           </div>

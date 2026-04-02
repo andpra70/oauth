@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OAuth Server Flow Map</title>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --text: #12232f;
+      --muted: #4f6472;
+      --line: #d4dde4;
+      --accent: #0f7a77;
+      --accent-soft: #d9f2ef;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top right, #e8f5ff, #f4f6f8 50%);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    main {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 24px 16px 48px;
+    }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 10px 26px rgba(16, 37, 52, 0.06);
+    }
+    .hero {
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: 1.6rem;
+    }
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .summary-item {
+      background: var(--accent-soft);
+      border: 1px solid #b8e3df;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.95rem;
+    }
+    .section {
+      margin-top: 16px;
+    }
+    .panel {
+      padding: 14px;
+      overflow: auto;
+    }
+    h2 {
+      margin: 0 0 10px;
+      font-size: 1.1rem;
+    }
+    .note {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    .mermaid {
+      min-width: 960px;
+    }
+    .back-link {
+      display: inline-block;
+      margin-top: 12px;
+      text-decoration: none;
+      color: var(--accent);
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>Sequenze OAuth/OIDC complete</h1>
+      <p>Diagramma operativo end-to-end per login locale, login Google federato, TOTP/passkey e logout con i principali casi alternativi ed errori previsti.</p>
+      <div class="summary">
+        <div class="summary-item"><strong>Attori:</strong> Browser App, Browser Widget, Front Controller, OAuth Server, Google, OIDC Store</div>
+        <div class="summary-item"><strong>Flussi:</strong> Authorization Code + PKCE, callback, token exchange, userinfo</div>
+        <div class="summary-item"><strong>Sicurezza:</strong> TOTP setup/challenge, passkey registration, session handling</div>
+        <div class="summary-item"><strong>Errori:</strong> invalid_redirect_uri, redirect_uri_mismatch, session expired, access_denied, server_error</div>
+      </div>
+      <a class="back-link" href="./app">Torna alla console</a>
+    </section>
+
+    <section class="section panel">
+      <h2>1) Login OIDC standard (username/password + PKCE)</h2>
+      <p class="note">Copre avvio `/auth`, eventuale login locale, consenso, callback client e code-to-token exchange.</p>
+      <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as Utente
+  participant APP as Browser App (/app)
+  participant FC as Front Controller/Proxy
+  participant OP as OAuth Server (OIDC Provider)
+  participant DB as OIDC Store/DB
+  participant API as /me endpoint
+
+  U->>APP: Click "Accedi con OAuth"
+  APP->>APP: Genera code_verifier/challenge + state (PKCE)
+  APP->>FC: GET /oauth-server/auth?...&code_challenge=S256
+  FC->>OP: Forward request con X-Forwarded-*
+  OP->>DB: Valida client_id, redirect_uri, policy runtime
+  alt redirect_uri non registrata o incoerente
+    OP-->>APP: errore invalid_redirect_uri
+  else richiesta valida
+    OP-->>APP: Pagina login /interaction/:uid
+    U->>APP: Inserisce username/password
+    APP->>FC: POST /oauth-server/interaction/:uid/login
+    FC->>OP: Forward submit
+    OP->>DB: Verifica credenziali
+    alt credenziali errate
+      OP-->>APP: Login page con errore
+    else credenziali valide
+      alt CONSENT_ENABLED=true e scope nuovi
+        OP-->>APP: Pagina consenso /interaction/:uid
+        U->>APP: Click Allow o Deny
+        alt Deny
+          OP-->>APP: redirect_uri?error=access_denied&state=...
+        else Allow
+          OP->>DB: Salva grant
+          OP-->>APP: Redirect a redirect_uri?code=...&state=...
+        end
+      else consenso non richiesto
+        OP-->>APP: Redirect a redirect_uri?code=...&state=...
+      end
+      APP->>OP: POST /oauth-server/token (authorization_code + verifier)
+      OP->>DB: Valida code, PKCE verifier, sessione
+      alt verifier/state invalidi o code scaduto
+        OP-->>APP: errore invalid_grant
+      else exchange ok
+        OP-->>APP: access_token + id_token + refresh_token
+        APP->>API: GET /oauth-server/me (Bearer access_token)
+        API-->>APP: profilo utente JSON
+      end
+    end
+  end
+      </pre>
+    </section>
+
+    <section class="section panel">
+      <h2>2) Login con Google federato</h2>
+      <p class="note">Copre redirect verso Google, callback `/auth/google/callback`, provisioning account locale e ritorno al flusso OIDC.</p>
+      <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as Utente
+  participant W as Browser Widget/UI Login
+  participant FC as Front Controller/Proxy
+  participant OP as OAuth Server
+  participant G as Google OAuth
+  participant DB as User DB + OIDC Store
+
+  U->>W: Click "Login con Google"
+  W->>FC: GET /oauth-server/auth/google?uid=interaction_uid
+  FC->>OP: Forward request
+  OP->>OP: Calcola callback Google da host/proto/basePath correnti
+  OP-->>W: 302 verso accounts.google.com/o/oauth2/v2/auth
+  W->>G: GET auth request (client_id, redirect_uri, state)
+  alt redirect_uri non registrata su Google
+    G-->>W: 400 redirect_uri_mismatch
+  else utente annulla
+    G-->>W: callback con error=access_denied
+    W->>OP: GET /oauth-server/auth/google/callback?error=...
+    OP-->>W: ritorno interaction con errore
+  else login Google ok
+    G-->>W: redirect verso /oauth-server/auth/google/callback?code=...&state=...
+    W->>FC: callback al front-controller
+    FC->>OP: forward callback preservando schema/host
+    OP->>G: Token exchange + userinfo
+    OP->>DB: upsertGoogleUser(sub,email,profile)
+    OP->>DB: collega account a interaction/sessione OIDC
+    OP-->>W: redirect su /interaction/:uid (consent o completamento)
+    alt consento richiesto
+      W->>OP: POST allow/deny
+      OP-->>W: redirect a client redirect_uri con code/state
+    else consento non richiesto
+      OP-->>W: redirect immediato a client redirect_uri con code/state
+    end
+  end
+      </pre>
+    </section>
+
+    <section class="section panel">
+      <h2>3) TOTP e Passkey (step-up / onboarding)</h2>
+      <p class="note">Mostra setup QR, challenge OTP in interaction e registrazione passkey da setup endpoint.</p>
+      <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor A as Admin
+  actor U as Utente
+  participant APP as Browser App
+  participant OP as OAuth Server
+  participant DB as User DB
+  participant WA as WebAuthn Authenticator
+
+  rect rgb(240,248,255)
+  Note over A,DB: Setup TOTP iniziale
+  A->>APP: Click "Mostra QR TOTP"
+  APP->>OP: GET /setup/2fa-qr/:username.json?token=SETUP_TOKEN
+  OP->>DB: Legge/crea secret TOTP utente
+  OP-->>APP: dataUrl QR + otpauth URL
+  end
+
+  rect rgb(246,255,246)
+  Note over U,DB: Login con TOTP richiesto
+  U->>OP: Submit username/password su /interaction/:uid/login
+  OP->>DB: Verifica credenziali
+  alt TWO_FACTOR_ENABLED=true
+    OP-->>U: Mostra form OTP su /interaction/:uid
+    U->>OP: POST OTP code
+    OP->>DB: Verifica OTP (finestra temporale)
+    alt OTP invalid/scaduto
+      OP-->>U: Errore OTP, resta su interaction
+    else OTP valido
+      OP-->>U: Prosegue su consent/callback auth code
+    end
+  else TWO_FACTOR_ENABLED=false
+    OP-->>U: Prosegue senza OTP
+  end
+  end
+
+  rect rgb(255,247,240)
+  Note over A,WA: Registrazione passkey
+  A->>APP: Click "Registra/Resetta Passkey"
+  APP->>OP: POST /setup/passkeys/:username/options?token=SETUP_TOKEN
+  OP->>DB: Prepara challenge registration
+  OP-->>APP: PublicKeyCredentialCreationOptions
+  APP->>WA: navigator.credentials.create()
+  WA-->>APP: Attestation response
+  APP->>OP: POST /setup/passkeys/:username/verify?token=SETUP_TOKEN
+  OP->>DB: Verifica attestation + salva credential/public_key
+  alt origin/rpId incoerenti
+    OP-->>APP: errore "Unexpected registration response origin"
+  else registrazione ok
+    OP-->>APP: conferma passkey registrata
+  end
+  end
+      </pre>
+    </section>
+
+    <section class="section panel">
+      <h2>4) Logout e pulizia sessione</h2>
+      <p class="note">Flusso RP-initiated logout con post logout redirect e varianti con conferma.</p>
+      <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as Utente
+  participant APP as Browser App/Widget
+  participant FC as Front Controller/Proxy
+  participant OP as OAuth Server
+  participant DB as OIDC Store
+
+  U->>APP: Click "Pulisci sessione" / Logout
+  APP->>FC: GET /oauth-server/session/end?client_id=...&post_logout_redirect_uri=...&state=session-cleared
+  FC->>OP: Forward richiesta
+  OP->>DB: Valida sessione e client logout URI
+  alt URI non registrata o non coerente
+    OP-->>APP: errore invalid_request
+  else richiesta valida
+    alt CONFIRM_LOGOUT=true
+      OP-->>APP: pagina conferma logout /session/end/confirm
+      U->>APP: Conferma logout
+      APP->>OP: POST /session/end/confirm
+    else CONFIRM_LOGOUT=false
+      OP->>OP: autosubmit logout
+    end
+    OP->>DB: Revoca/cancella sessione browser + grant correlati
+    OP-->>APP: redirect post_logout_redirect_uri?state=session-cleared
+    APP->>APP: Reset stato locale + ripristino console/widget
+  end
+
+  Note over FC,OP: Se il proxy non preserva schema/host -> redirect errati http/https e 400 su porta TLS
+      </pre>
+    </section>
+  </main>
+
+  <script type="module">
+    import mermaid from 'https://unpkg.com/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'base',
+      themeVariables: {
+        primaryColor: '#f5fbfa',
+        primaryTextColor: '#0f2230',
+        primaryBorderColor: '#0f7a77',
+        lineColor: '#4f6472',
+        actorBorder: '#0f7a77',
+        actorTextColor: '#0f2230',
+        actorBkg: '#d9f2ef',
+        noteBkgColor: '#fffdf0',
+        noteBorderColor: '#c9bc71',
+        activationBorderColor: '#0f7a77',
+      },
+      sequence: {
+        showSequenceNumbers: true,
+      },
+    });
+  </script>
+</body>
+</html>
