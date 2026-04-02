@@ -41,7 +41,7 @@ In locale usa tipicamente `.env` (copiato da `.env.example`), mentre nell'immagi
 | `BASE_PATH` | derivato da pathname di `ISSUER` | Prefisso path del provider (es. `/oauth-server`). Se vuoto o `/`, il provider gira in root. |
 | `PORT` | `9000` | Porta HTTP interna del processo Node.js. |
 | `ISSUER` | `http://localhost:<PORT>` | Issuer OIDC pubblico. Deve riflettere URL reale (schema, host, porta, path). |
-| `TRUST_PROXY` | `false` | Se `true`, Express si fida degli header del reverse proxy (`X-Forwarded-*`). |
+| `TRUST_PROXY` | `true` | Se `true`, Express si fida degli header del reverse proxy (`X-Forwarded-*`). Necessario dietro front-controller/reverse proxy HTTPS. |
 | `COOKIE_KEYS` | nessuno | Chiavi cookie firmati, separate da virgola. Obbligatorie almeno 3 chiavi, altrimenti il server non parte. |
 | `ALLOWED_ORIGINS` | `http://localhost:9000,http://localhost:8080,http://localhost` | Origin consentite per callback esterne (`callbackUrl`) e uso cross-origin del widget. |
 | `TWO_FACTOR_ENABLED` | `true` | Abilita/disabilita la richiesta OTP TOTP durante login (stato iniziale runtime). |

@@ -65,6 +65,19 @@ function cleanupExpired(store) {
   }
 }
 
+function cleanupExpiredInPlace(store) {
+  let changed = false;
+  for (const bucket of Object.values(store.records)) {
+    for (const [id, entry] of Object.entries(bucket)) {
+      if (isExpired(entry)) {
+        delete bucket[id];
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
 export function ensureOidcStore() {
   if (!existsSync(storePath)) {
     mkdirSync('data/oauth', { recursive: true });
@@ -185,4 +198,170 @@ export class JsonAdapter {
       saveStore(store);
     }
   }
+}
+
+export function listOidcStoreOverview() {
+  const store = loadStore();
+  const changed = cleanupExpiredInPlace(store);
+  if (changed) {
+    saveStore(store);
+  }
+
+  const records = store.records || {};
+  const sessionsBucket = records.Session && typeof records.Session === 'object' ? records.Session : {};
+  const grantsBucket = records.Grant && typeof records.Grant === 'object' ? records.Grant : {};
+  const accessTokenBucket = records.AccessToken && typeof records.AccessToken === 'object' ? records.AccessToken : {};
+  const refreshTokenBucket = records.RefreshToken && typeof records.RefreshToken === 'object' ? records.RefreshToken : {};
+  const authorizationCodeBucket = records.AuthorizationCode && typeof records.AuthorizationCode === 'object' ? records.AuthorizationCode : {};
+
+  const tokenCountsBySessionUid = {};
+  const grantCountsBySessionUid = {};
+  const addCount = (map, key) => {
+    if (!key) return;
+    map[key] = (map[key] || 0) + 1;
+  };
+
+  for (const entry of Object.values(accessTokenBucket)) {
+    const uid = entry?.payload?.sessionUid || '';
+    addCount(tokenCountsBySessionUid, `access:${uid}`);
+    addCount(grantCountsBySessionUid, `grant:${entry?.payload?.grantId || ''}`);
+  }
+  for (const entry of Object.values(refreshTokenBucket)) {
+    const uid = entry?.payload?.sessionUid || '';
+    addCount(tokenCountsBySessionUid, `refresh:${uid}`);
+    addCount(grantCountsBySessionUid, `grant:${entry?.payload?.grantId || ''}`);
+  }
+  for (const entry of Object.values(authorizationCodeBucket)) {
+    const uid = entry?.payload?.sessionUid || '';
+    addCount(tokenCountsBySessionUid, `code:${uid}`);
+    addCount(grantCountsBySessionUid, `grant:${entry?.payload?.grantId || ''}`);
+  }
+
+  const sessions = Object.entries(sessionsBucket)
+    .map(([id, entry]) => {
+      const payload = entry?.payload || {};
+      const uid = String(payload.uid || '');
+      const authorizations = payload.authorizations && typeof payload.authorizations === 'object'
+        ? payload.authorizations
+        : {};
+      const clients = Object.keys(authorizations);
+      const grantIds = Object.values(authorizations)
+        .map((value) => String(value?.grantId || ''))
+        .filter(Boolean);
+
+      return {
+        id,
+        uid,
+        accountId: String(payload.accountId || ''),
+        loginTs: Number(payload.loginTs || 0) || null,
+        expiresAt: Number(entry?.expiresAt || 0) || null,
+        clients,
+        grantIds,
+        accessTokenCount: tokenCountsBySessionUid[`access:${uid}`] || 0,
+        refreshTokenCount: tokenCountsBySessionUid[`refresh:${uid}`] || 0,
+        authorizationCodeCount: tokenCountsBySessionUid[`code:${uid}`] || 0,
+      };
+    })
+    .sort((left, right) => (right.loginTs || 0) - (left.loginTs || 0));
+
+  const recordsByModel = {};
+  for (const [model, bucket] of Object.entries(records)) {
+    recordsByModel[model] = Object.keys(bucket || {}).length;
+  }
+
+  const grants = Object.entries(grantsBucket)
+    .map(([id, entry]) => ({
+      id,
+      accountId: String(entry?.payload?.accountId || ''),
+      clientId: String(entry?.payload?.clientId || ''),
+      expiresAt: Number(entry?.expiresAt || 0) || null,
+      linkedArtifacts: grantCountsBySessionUid[`grant:${id}`] || 0,
+    }))
+    .sort((left, right) => (right.expiresAt || 0) - (left.expiresAt || 0));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totals: {
+      sessions: sessions.length,
+      grants: grants.length,
+    },
+    recordsByModel,
+    sessions,
+    grants,
+  };
+}
+
+export function removeOidcRecord(model, id) {
+  const bucketName = String(model || '').trim();
+  const recordId = String(id || '').trim();
+  if (!bucketName || !recordId) return false;
+
+  const store = loadStore();
+  const bucket = ensureModelBucket(store, bucketName);
+  if (!bucket[recordId]) return false;
+  delete bucket[recordId];
+  saveStore(store);
+  return true;
+}
+
+export function revokeOidcByGrantId(grantId) {
+  const targetGrantId = String(grantId || '').trim();
+  if (!targetGrantId) return 0;
+
+  const store = loadStore();
+  let deleted = 0;
+  for (const [model, bucket] of Object.entries(store.records || {})) {
+    const isGrantRecord = model === 'Grant';
+    const isGrantableRecord = grantable.has(model);
+    for (const [id, entry] of Object.entries(bucket || {})) {
+      if (isExpired(entry)) {
+        delete bucket[id];
+        deleted += 1;
+        continue;
+      }
+      if (isGrantRecord && id === targetGrantId) {
+        delete bucket[id];
+        deleted += 1;
+        continue;
+      }
+      if (isGrantableRecord && String(entry?.payload?.grantId || '') === targetGrantId) {
+        delete bucket[id];
+        deleted += 1;
+      }
+    }
+  }
+
+  if (deleted > 0) {
+    saveStore(store);
+  }
+  return deleted;
+}
+
+export function revokeOidcBySessionUid(sessionUid) {
+  const targetSessionUid = String(sessionUid || '').trim();
+  if (!targetSessionUid) return 0;
+
+  const store = loadStore();
+  let deleted = 0;
+  for (const [model, bucket] of Object.entries(store.records || {})) {
+    for (const [id, entry] of Object.entries(bucket || {})) {
+      if (isExpired(entry)) {
+        delete bucket[id];
+        deleted += 1;
+        continue;
+      }
+      const payload = entry?.payload || {};
+      const isSession = model === 'Session' && String(payload.uid || '') === targetSessionUid;
+      const isLinked = String(payload.sessionUid || '') === targetSessionUid;
+      if (isSession || isLinked) {
+        delete bucket[id];
+        deleted += 1;
+      }
+    }
+  }
+
+  if (deleted > 0) {
+    saveStore(store);
+  }
+  return deleted;
 }
