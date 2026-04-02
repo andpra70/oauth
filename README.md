@@ -71,10 +71,6 @@ Note operative:
 | `DEFAULT_CLIENT_ID` | `fileserver-web` | `client_id` del client creato/aggiornato all'avvio. |
 | `DEFAULT_CLIENT_AUTH_METHOD` | `none` | Metodo auth token endpoint (`none` per client pubblico PKCE, altrimenti secret richiesto). |
 | `DEFAULT_CLIENT_SECRET` | nessuno | Secret client. Obbligatorio (>=24 char) se `DEFAULT_CLIENT_AUTH_METHOD != none`. |
-| `DEFAULT_CLIENT_REDIRECT_URIS` | derivate da `ISSUER`/`BASE_PATH` | Redirect URI consentite, separate da virgola. |
-| `DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS` | derivate da `ISSUER`/`BASE_PATH` | Redirect URI post logout consentite, separate da virgola. |
-| `DEFAULT_CLIENT_REDIRECT_URI` | fallback legacy | Alias legacy singolare di `DEFAULT_CLIENT_REDIRECT_URIS` (usato solo se la versione plurale è assente). |
-| `DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URI` | fallback legacy | Alias legacy singolare di `DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS`. |
 
 ### Google OAuth (opzionale)
 
@@ -154,21 +150,20 @@ Regola pratica:
 - SPA che chiama `/auth` e `/token` dal browser: usa sempre URL pubblico.
 - Backend/BFF che chiama `/token` server-to-server: può usare URL interno Docker.
 
-### 2) Configura Il Client OIDC Con Le Redirect URI Della Tua App
+### 2) Configura Il Client OIDC Della Tua App
 
-Inserisci tutte le callback consentite del client nella configurazione runtime del provider (`.env` in locale, `.env.prod` per build Docker), separate da virgola.
+Configura il client e le origin consentite nella configurazione runtime del provider (`.env` in locale, `.env.prod` per build Docker).
+Le redirect URI vengono derivate automaticamente da `ISSUER` + `BASE_PATH` e, durante `/auth`, possono essere auto-registrate se coerenti con origin richiesta/consentite.
 
 Esempio:
 
 ```bash
 DEFAULT_CLIENT_ID=fileserver-web
 DEFAULT_CLIENT_AUTH_METHOD=none
-DEFAULT_CLIENT_REDIRECT_URIS=http://localhost:9000/app/callback,http://localhost:9000/authWidget/callback,http://localhost:8080/oauth/callback
-DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS=http://localhost:9000/app,http://localhost:9000/authWidget,http://localhost:8080
 ALLOWED_ORIGINS=http://localhost:9000,http://localhost:8080,http://localhost
 ```
 
-Se manca la redirect URI reale della tua app, vedrai errori su `/token` (`400 Bad Request`).
+Se la redirect URI non è coerente con `ISSUER`/`BASE_PATH` o non passa i controlli di origin, vedrai errori su `/auth` o `/token`.
 
 ### 3) Esempio Compose Con App Esterna
 
@@ -222,7 +217,7 @@ http://localhost:9000/auth?client_id=fileserver-web&redirect_uri=http%3A%2F%2Flo
 ### 7) Checklist Rapida Di Troubleshooting
 
 1. `ISSUER` pubblico raggiungibile dal browser.
-2. Redirect URI esatta presente in `DEFAULT_CLIENT_REDIRECT_URIS`.
+2. `BASE_PATH` allineato al contesto pubblico (es. `/oauth-server`).
 3. `DEFAULT_CLIENT_AUTH_METHOD=none` per client PKCE pubblico senza secret.
 4. Origin della tua app presente in `ALLOWED_ORIGINS`.
 5. Dopo modifica della configurazione runtime (`.env` o `.env.prod`), riavvia il provider e ricostruisci l'immagine se usi Docker.

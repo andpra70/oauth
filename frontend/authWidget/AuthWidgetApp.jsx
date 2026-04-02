@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { appPath, defaultIssuer, issuerEndpoint, resolveBrowserUrl } from '../shared/api.js';
+import { appPath, issuerEndpoint, resolveBrowserUrl } from '../shared/api.js';
 
 const storageKey = 'oauth-authWidget';
 const oauthTransientParams = ['code', 'state', 'iss', 'scope', 'authuser', 'prompt', 'error', 'error_description'];
@@ -75,6 +75,10 @@ function cleanupCurrentUrl() {
   window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
 }
 
+function issuerFromCurrentContext() {
+  return new URL(appPath(''), window.location.origin).toString().replace(/\/$/, '');
+}
+
 function defaultConfig() {
   const runtime = readRuntimeConfig();
   const fallbackOrigin = runtime.origin || window.location.origin;
@@ -86,13 +90,24 @@ function defaultConfig() {
     : resolveWithOrigin(appPath('authWidget'), fallbackOrigin);
 
   return {
-    issuer: runtime.issuer || defaultIssuer(),
+    issuer: runtime.issuer || issuerFromCurrentContext(),
     clientId: runtime.clientId || 'fileserver-web',
     origin: fallbackOrigin,
     redirectUri,
     postLogoutRedirectUri,
     scope: runtime.scope || 'openid profile email offline_access',
     ctas: runtime.ctas,
+  };
+}
+
+function applySavedConfig(defaults, saved = {}) {
+  const merged = { ...defaults, ...(saved || {}) };
+  return {
+    ...merged,
+    issuer: defaults.issuer,
+    origin: defaults.origin,
+    redirectUri: defaults.redirectUri,
+    postLogoutRedirectUri: defaults.postLogoutRedirectUri,
   };
 }
 
@@ -141,7 +156,7 @@ async function exchangeCode(code, state) {
 
 async function fetchProfile() {
   const saved = loadSession();
-  const config = { ...defaultConfig(), ...(saved.config || {}) };
+  const config = applySavedConfig(defaultConfig(), saved.config || {});
   const accessToken = saved.tokens?.access_token;
   if (!accessToken) {
     throw new Error('Access token non disponibile.');
@@ -162,14 +177,14 @@ async function fetchProfile() {
 }
 
 async function startLoginFlow() {
-  const config = { ...defaultConfig(), ...(loadSession().config || {}) };
+  const config = applySavedConfig(defaultConfig(), loadSession().config || {});
   config.redirectUri = resolveWithOrigin(config.redirectUri, config.origin || '');
   config.postLogoutRedirectUri = resolveWithOrigin(config.postLogoutRedirectUri, config.origin || '');
   const verifier = randomString(48);
   const state = randomString(24);
   const challenge = await sha256(verifier);
 
-  saveSession({ ...loadSession(), verifier, state, config });
+  saveSession({ verifier, state, config });
 
   const url = new URL(issuerEndpoint(config.issuer, 'auth'));
   url.searchParams.set('client_id', config.clientId);
@@ -184,7 +199,7 @@ async function startLoginFlow() {
 
 function startLogoutFlow() {
   const saved = loadSession();
-  const config = { ...defaultConfig(), ...(saved.config || {}) };
+  const config = applySavedConfig(defaultConfig(), saved.config || {});
   config.postLogoutRedirectUri = resolveWithOrigin(config.postLogoutRedirectUri, config.origin || '');
   clearSession();
 

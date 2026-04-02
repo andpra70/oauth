@@ -1,22 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import { appPath, defaultIssuer, issuerEndpoint, resolveBrowserUrl } from '../shared/api.js';
+import { appPath, issuerEndpoint, resolveBrowserUrl } from '../shared/api.js';
 
 const storageKey = 'oauth-console.pkce';
 
-function issuerWithCurrentHost() {
-  try {
-    const issuerUrl = new URL(defaultIssuer());
-    issuerUrl.protocol = window.location.protocol;
-    issuerUrl.host = window.location.host;
-    return issuerUrl.toString().replace(/\/$/, '');
-  } catch {
-    return new URL(appPath(''), window.location.origin).toString().replace(/\/$/, '');
-  }
+function issuerFromCurrentContext() {
+  return new URL(appPath(''), window.location.origin).toString().replace(/\/$/, '');
 }
 
 function getDefaults() {
   return {
-    issuer: issuerWithCurrentHost(),
+    issuer: issuerFromCurrentContext(),
     clientId: 'fileserver-web',
     redirectUri: appPath('app/callback'),
     callbackUrl: '',

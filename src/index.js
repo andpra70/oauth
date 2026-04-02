@@ -11,7 +11,7 @@ import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import { Provider, errors } from 'oidc-provider';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
-import { clearUserPasskeys, createUser, deleteUser, ensureSchema, findPasskeyByCredentialId, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, touchUserPasskeyCounter, updateUser, updateUserProfile, upsertGoogleUser, upsertUserPasskey } from './db.js';
+import { clearUserPasskeys, createUser, deleteUser, ensureClientPostLogoutRedirectUri, ensureClientRedirectUri, ensureSchema, findPasskeyByCredentialId, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, touchUserPasskeyCounter, updateUser, updateUserProfile, upsertGoogleUser, upsertUserPasskey } from './db.js';
 import { findAccount } from './account.js';
 import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderPasskeyOnboarding, renderRegister, renderTotpQrSetup, renderUsersAdmin } from './html.js';
 import { ensureOidcStore, JsonAdapter } from './oidc-adapter.js';
@@ -23,11 +23,12 @@ const port = Number(process.env.PORT || 9000);
 const issuer = process.env.ISSUER || `http://localhost:${port}`;
 const issuerUrl = new URL(issuer);
 const cookieKeys = (process.env.COOKIE_KEYS || '').split(',').map((s) => s.trim()).filter(Boolean);
-const trustProxy = String(process.env.TRUST_PROXY || 'false').toLowerCase() === 'true';
+const trustProxy = String(process.env.TRUST_PROXY || 'true').toLowerCase() !== 'false';
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:9000,http://localhost:8080,http://localhost')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+const allowedOriginSet = new Set([issuerUrl.origin, ...allowedOrigins.map(normalizeOrigin).filter(Boolean)]);
 const runtimeConfig = {
   twoFactorEnabled: String(process.env.TWO_FACTOR_ENABLED || 'true').toLowerCase() !== 'false',
   consentEnabled: String(process.env.CONSENT_ENABLED || 'true').toLowerCase() !== 'false',
@@ -70,6 +71,90 @@ function normalizeOrigin(value) {
   } catch {
     return '';
   }
+}
+
+function inferRequestProtocol(req) {
+  const forwardedProto = String(req.get('x-forwarded-proto') || '').split(',')[0].trim().toLowerCase();
+  if (forwardedProto === 'http' || forwardedProto === 'https') return forwardedProto;
+
+  const forwardedHeader = String(req.get('forwarded') || '');
+  const protoMatch = forwardedHeader.match(/(?:^|[;,]\s*)proto=(https?|\"https?\"|\'https?\')/i);
+  if (protoMatch?.[1]) {
+    return String(protoMatch[1]).replace(/['"]/g, '').toLowerCase();
+  }
+
+  const origin = normalizeOrigin(req.get('origin') || '');
+  const referer = normalizeOrigin(req.get('referer') || '');
+  const forwardedHost = String(req.get('x-forwarded-host') || '').split(',')[0].trim().toLowerCase();
+  const host = String(forwardedHost || req.get('host') || '').trim().toLowerCase();
+  const originUrl = origin ? new URL(origin) : null;
+  const refererUrl = referer ? new URL(referer) : null;
+
+  if (originUrl && originUrl.host.toLowerCase() === host && originUrl.protocol === 'https:') return 'https';
+  if (refererUrl && refererUrl.host.toLowerCase() === host && refererUrl.protocol === 'https:') return 'https';
+
+  const hostPort = host.includes(':') ? Number(host.split(':').pop()) : null;
+  if (hostPort === 443 || hostPort === 55443) return 'https';
+
+  if (req.socket?.encrypted) return 'https';
+  return issuerUrl.protocol.replace(':', '') || 'http';
+}
+
+function getRequestOrigin(req) {
+  const protocol = inferRequestProtocol(req);
+  const host = String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+  return normalizeOrigin(`${protocol}://${host}`);
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeAbsoluteUrlsForHosts(html, protocol, hosts = []) {
+  const markup = String(html || '');
+  const normalizedProtocol = protocol === 'https' ? 'https' : 'http';
+  if (!markup) return markup;
+  let output = markup;
+  for (const rawHost of hosts) {
+    const host = String(rawHost || '').trim();
+    if (!host) continue;
+    const pattern = new RegExp(`https?:\\/\\/${escapeRegExp(host)}`, 'gi');
+    output = output.replace(pattern, `${normalizedProtocol}://${host}`);
+  }
+  return output;
+}
+
+function hostFromUrl(value) {
+  try {
+    return new URL(value).host;
+  } catch {
+    return '';
+  }
+}
+
+function getGoogleCallbackUrl(req) {
+  const requestOrigin = req ? getRequestOrigin(req) : '';
+  if (requestOrigin) {
+    const requestBasePath = normalizeBasePath(req.baseUrl || basePath);
+    return new URL(resolvePath(requestBasePath, googleCallbackRoutePath), `${requestOrigin}/`).toString();
+  }
+  if (configuredGoogleCallbackUrl) return configuredGoogleCallbackUrl;
+  return new URL(googleCallbackPath, `${issuerUrl.origin}/`).toString();
+}
+
+function getPasskeyRpId(req) {
+  if (configuredPasskeyRpId) return configuredPasskeyRpId;
+  const host = String(req?.get('x-forwarded-host') || req?.get('host') || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  const hostname = host.includes(':') ? host.split(':')[0] : host;
+  return hostname || issuerUrl.hostname;
+}
+
+function getPasskeyOrigin(req) {
+  if (configuredPasskeyOrigin) return configuredPasskeyOrigin;
+  return getRequestOrigin(req) || issuerUrl.origin;
 }
 
 function parseBearerToken(req) {
@@ -123,10 +208,10 @@ const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
 const defaultGoogleCallbackPath = resolvePath(basePath, '/auth/google/callback');
 const googleCallbackPath = process.env.GOOGLE_CALLBACK_PATH || defaultGoogleCallbackPath;
 const googleCallbackRoutePath = stripBasePath(googleCallbackPath, basePath);
-const googleCallbackUrl = process.env.GOOGLE_CALLBACK_URL || new URL(googleCallbackPath, `${issuerUrl.origin}/`).toString();
+const configuredGoogleCallbackUrl = process.env.GOOGLE_CALLBACK_URL || '';
 const googleConfigured = Boolean(googleClientId && googleClientSecret);
-const passkeyRpId = process.env.PASSKEY_RP_ID || issuerUrl.hostname;
-const passkeyOrigin = process.env.PASSKEY_ORIGIN || issuerUrl.origin;
+const configuredPasskeyRpId = process.env.PASSKEY_RP_ID || '';
+const configuredPasskeyOrigin = process.env.PASSKEY_ORIGIN || '';
 const passkeyRpName = process.env.PASSKEY_RP_NAME || 'Local OAuth2 Server';
 
 function renderTemplate(template) {
@@ -445,7 +530,7 @@ function consumePasskeyOnboardingSession(token, uid) {
   return data;
 }
 
-async function exchangeGoogleCode(code) {
+async function exchangeGoogleCode(code, redirectUri) {
   const response = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: {
@@ -455,7 +540,7 @@ async function exchangeGoogleCode(code) {
       code,
       client_id: googleClientId,
       client_secret: googleClientSecret,
-      redirect_uri: googleCallbackUrl,
+      redirect_uri: redirectUri,
       grant_type: 'authorization_code',
     }),
   });
@@ -495,9 +580,10 @@ async function startGoogleAuth(req, res, next) {
     await provider.interactionDetails(req, res);
 
     const state = createGoogleState(uid, mode);
+    const redirectUri = getGoogleCallbackUrl(req);
     const redirectUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     redirectUrl.searchParams.set('client_id', googleClientId);
-    redirectUrl.searchParams.set('redirect_uri', googleCallbackUrl);
+    redirectUrl.searchParams.set('redirect_uri', redirectUri);
     redirectUrl.searchParams.set('response_type', 'code');
     redirectUrl.searchParams.set('scope', 'openid profile email');
     redirectUrl.searchParams.set('state', state);
@@ -668,10 +754,23 @@ const provider = new Provider(issuer, {
     rpInitiatedLogout: {
       enabled: true,
       logoutSource(ctx, form) {
+        const forwardedHost = String(ctx.get('x-forwarded-host') || '').split(',')[0].trim();
+        const host = String(forwardedHost || ctx.host || '').split(',')[0].trim();
+        const protocol = inferRequestProtocol({
+          get: (name) => ctx.get(name),
+          socket: ctx.req?.socket,
+        });
+        const normalizedForm = normalizeAbsoluteUrlsForHosts(form, protocol, [
+          host,
+          forwardedHost,
+          ctx.host,
+          issuerUrl.host,
+          ...allowedOrigins.map(hostFromUrl),
+        ]);
         ctx.type = 'html';
         ctx.body = isConfirmLogoutEnabled()
-          ? renderLogout({ basePath, host: ctx.host, form })
-          : renderLogoutAutoSubmit({ form });
+          ? renderLogout({ basePath, host: host || ctx.host, form: normalizedForm })
+          : renderLogoutAutoSubmit({ basePath, form: normalizedForm });
       },
       postLogoutSuccessSource(ctx) {
         ctx.type = 'html';
@@ -750,6 +849,43 @@ const provider = new Provider(issuer, {
 provider.proxy = trustProxy;
 
 app.set('trust proxy', trustProxy);
+app.use((req, res, next) => {
+  const externalProtocol = inferRequestProtocol(req);
+  const forwardedHost = String(req.get('x-forwarded-host') || '').split(',')[0].trim();
+  const host = String(forwardedHost || req.get('host') || '').split(',')[0].trim();
+  const reqHost = String(req.get('host') || '').split(',')[0].trim();
+  const knownHosts = new Set([host, forwardedHost, reqHost].filter(Boolean).map((value) => value.toLowerCase()));
+
+  if (externalProtocol) {
+    req.headers['x-forwarded-proto'] = externalProtocol;
+  }
+  if (host) {
+    req.headers['x-forwarded-host'] = host;
+  }
+
+  const originalSetHeader = res.setHeader.bind(res);
+  res.setHeader = (name, value) => {
+    if (String(name).toLowerCase() === 'location' && typeof value === 'string' && host) {
+      try {
+        const locationUrl = new URL(value);
+        const locationHost = String(locationUrl.host || '').toLowerCase();
+        if (knownHosts.has(locationHost)) {
+          const relativeLocation = `${locationUrl.pathname}${locationUrl.search}${locationUrl.hash}`;
+          return originalSetHeader(name, relativeLocation || '/');
+        }
+      } catch {
+        const expectedHttpPrefix = `http://${host}/`;
+        const expectedHttpsPrefix = `https://${host}/`;
+        if (value.startsWith(expectedHttpPrefix) && externalProtocol === 'https') {
+          return originalSetHeader(name, value.replace(expectedHttpPrefix, expectedHttpsPrefix));
+        }
+      }
+    }
+    return originalSetHeader(name, value);
+  };
+
+  next();
+});
 app.use(helmet({
   contentSecurityPolicy: {
     useDefaults: true,
@@ -910,8 +1046,8 @@ web.get('/setup/runtime-config', (req, res) => {
     passkeyEnabled: isPasskeyEnabled(),
     confirmLogout: isConfirmLogoutEnabled(),
     googleConfigured,
-    passkeyRpId,
-    passkeyOrigin,
+    passkeyRpId: getPasskeyRpId(req),
+    passkeyOrigin: getPasskeyOrigin(req),
   });
 });
 
@@ -948,8 +1084,8 @@ web.post('/setup/runtime-config', formParser, (req, res) => {
     passkeyEnabled: isPasskeyEnabled(),
     confirmLogout: isConfirmLogoutEnabled(),
     googleConfigured,
-    passkeyRpId,
-    passkeyOrigin,
+    passkeyRpId: getPasskeyRpId(req),
+    passkeyOrigin: getPasskeyOrigin(req),
   });
 });
 
@@ -973,7 +1109,7 @@ web.post('/setup/passkeys/:username/options', jsonParser, async (req, res) => {
   try {
     const options = await generateRegistrationOptions({
       rpName: passkeyRpName,
-      rpID: passkeyRpId,
+      rpID: getPasskeyRpId(req),
       userID: Buffer.from(user.id, 'utf8'),
       userName: user.username,
       userDisplayName: user.email || user.username,
@@ -1028,8 +1164,8 @@ web.post('/setup/passkeys/:username/verify', jsonParser, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: credential,
       expectedChallenge: pending.challenge,
-      expectedOrigin: passkeyOrigin,
-      expectedRPID: passkeyRpId,
+      expectedOrigin: getPasskeyOrigin(req),
+      expectedRPID: getPasskeyRpId(req),
       requireUserVerification: false,
     });
 
@@ -1441,7 +1577,7 @@ web.post('/interaction/:uid/passkey/onboarding/options', jsonParser, async (req,
   try {
     const options = await generateRegistrationOptions({
       rpName: passkeyRpName,
-      rpID: passkeyRpId,
+      rpID: getPasskeyRpId(req),
       userID: Buffer.from(user.id, 'utf8'),
       userName: user.username,
       userDisplayName: user.email || user.username,
@@ -1489,8 +1625,8 @@ web.post('/interaction/:uid/passkey/onboarding/verify', jsonParser, async (req, 
     const verification = await verifyRegistrationResponse({
       response: credential,
       expectedChallenge: pending.challenge,
-      expectedOrigin: passkeyOrigin,
-      expectedRPID: passkeyRpId,
+      expectedOrigin: getPasskeyOrigin(req),
+      expectedRPID: getPasskeyRpId(req),
       requireUserVerification: false,
     });
 
@@ -1588,7 +1724,7 @@ web.post('/interaction/:uid/passkey/options', jsonParser, async (req, res) => {
   }
 
   const options = await generateAuthenticationOptions({
-    rpID: passkeyRpId,
+    rpID: getPasskeyRpId(req),
     userVerification: 'preferred',
     timeout: 60_000,
     allowCredentials,
@@ -1730,8 +1866,8 @@ web.post('/interaction/:uid/passkey/verify', jsonParser, async (req, res) => {
     const verification = await verifyAuthenticationResponse({
       response: credential,
       expectedChallenge: pending.challenge,
-      expectedOrigin: passkeyOrigin,
-      expectedRPID: passkeyRpId,
+      expectedOrigin: getPasskeyOrigin(req),
+      expectedRPID: getPasskeyRpId(req),
       credential: {
         id: resolved.passkey.id,
         publicKey: fromBase64Url(resolved.passkey.public_key),
@@ -1976,7 +2112,7 @@ web.get(googleCallbackRoutePath, async (req, res, next) => {
       return;
     }
 
-    const tokenSet = await exchangeGoogleCode(code);
+    const tokenSet = await exchangeGoogleCode(code, getGoogleCallbackUrl(req));
     const profile = await fetchGoogleProfile(tokenSet.access_token);
     const user = upsertGoogleUser(profile);
     const callbackToken = createGoogleCallbackSession(uid, user.id, pending.mode || 'login');
@@ -2127,6 +2263,36 @@ web.post('/interaction/:uid/abort', formParser, async (req, res, next) => {
     }
     next(err);
   }
+});
+
+function canAutoRegisterClientUri(req, rawUri) {
+  const uriOrigin = normalizeOrigin(rawUri);
+  if (!uriOrigin) return false;
+  if (allowedOriginSet.has(uriOrigin)) return true;
+  const requestOrigin = getRequestOrigin(req);
+  return Boolean(requestOrigin) && uriOrigin === requestOrigin;
+}
+
+web.use('/auth', (req, _res, next) => {
+  const clientId = String(req.query.client_id || '').trim();
+  const redirectUri = String(req.query.redirect_uri || '').trim();
+  if (!clientId || !redirectUri || !canAutoRegisterClientUri(req, redirectUri)) {
+    next();
+    return;
+  }
+  ensureClientRedirectUri(clientId, redirectUri);
+  next();
+});
+
+web.use('/session/end', (req, _res, next) => {
+  const clientId = String(req.query.client_id || '').trim();
+  const postLogoutRedirectUri = String(req.query.post_logout_redirect_uri || '').trim();
+  if (!clientId || !postLogoutRedirectUri || !canAutoRegisterClientUri(req, postLogoutRedirectUri)) {
+    next();
+    return;
+  }
+  ensureClientPostLogoutRedirectUri(clientId, postLogoutRedirectUri);
+  next();
 });
 
 web.use(provider.callback());
