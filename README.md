@@ -21,26 +21,89 @@ npm run dev
 ## Avvio con Docker
 
 ```bash
-cp .env.example .env
 docker compose up --build
 ```
 
-`docker-compose.yml` legge la configurazione dal file `./.env`, inclusi secret applicativi come `COOKIE_KEYS`, `ADMIN_PASSWORD`, `DEFAULT_CLIENT_SECRET`, `SETUP_TOKEN` e gli eventuali secret Google.
+Nel build Docker, il file `.env.prod` viene copiato dentro l'immagine come `.env`.
+Questo significa che in deploy il server usa la configurazione applicativa di produzione già inclusa nell'immagine.
 
-I path del compose restano relativi alla directory che contiene `docker-compose.yml`. Se vuoi pubblicare il provider sotto un subcontext, imposta `ISSUER` con il path finale e opzionalmente `BASE_PATH`. Esempio: `ISSUER=https://auth.example.com/oauth` e `BASE_PATH=/oauth`.
+Il file `./.env` accanto a `docker-compose.yml` resta utile per le variabili del compose (es. immagine, porta host, volume), non per i secret applicativi runtime.
 
-Se `DEFAULT_CLIENT_REDIRECT_URIS`, `DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS`, `GOOGLE_CALLBACK_PATH` e `GOOGLE_CALLBACK_URL` non sono valorizzate, l'app li deriva automaticamente da `ISSUER` e `BASE_PATH`.
+## Configurazione `.env`
 
-`TWO_FACTOR_ENABLED`, `CONSENT_ENABLED`, `GOOGLE_OAUTH_ENABLED`, `PASSKEY_ENABLED` e `CONFIRM_LOGOUT` impostano lo stato iniziale del server all'avvio. Per cambiare i flag a caldo senza riavviare usa `POST /setup/runtime-config`.
+L'app carica le variabili da `.env` tramite `dotenv`.
+In locale usa tipicamente `.env` (copiato da `.env.example`), mentre nell'immagine Docker il `.env` deriva da `.env.prod`.
 
-Variabili specifiche del compose:
+### Variabili applicative (runtime server)
 
-```bash
-OAUTH_SERVER_IMAGE=docker.io/andpra70/oauth-server:latest
-OAUTH_SERVER_RESTART=unless-stopped
-OAUTH_SERVER_PORT=9000
-OAUTH_SERVER_DATA_VOLUME=oauth-server-data
-```
+| Variabile | Default | Significato |
+| --- | --- | --- |
+| `BASE_PATH` | derivato da pathname di `ISSUER` | Prefisso path del provider (es. `/oauth-server`). Se vuoto o `/`, il provider gira in root. |
+| `PORT` | `9000` | Porta HTTP interna del processo Node.js. |
+| `ISSUER` | `http://localhost:<PORT>` | Issuer OIDC pubblico. Deve riflettere URL reale (schema, host, porta, path). |
+| `TRUST_PROXY` | `false` | Se `true`, Express si fida degli header del reverse proxy (`X-Forwarded-*`). |
+| `COOKIE_KEYS` | nessuno | Chiavi cookie firmati, separate da virgola. Obbligatorie almeno 3 chiavi, altrimenti il server non parte. |
+| `ALLOWED_ORIGINS` | `http://localhost:9000,http://localhost:8080,http://localhost` | Origin consentite per callback esterne (`callbackUrl`) e uso cross-origin del widget. |
+| `TWO_FACTOR_ENABLED` | `true` | Abilita/disabilita la richiesta OTP TOTP durante login (stato iniziale runtime). |
+| `CONSENT_ENABLED` | `true` | Mostra/nasconde schermata consenso OIDC (stato iniziale runtime). |
+| `GOOGLE_OAUTH_ENABLED` | `true` | Abilita/disabilita pulsanti/flow Google (richiede anche client Google configurato). |
+| `PASSKEY_ENABLED` | `false` | Abilita/disabilita login e onboarding passkey (WebAuthn). |
+| `CONFIRM_LOGOUT` | `true` | Se `true`, mostra conferma logout prima di chiudere sessione OIDC. |
+| `SETUP_TOKEN` | nessuno | Token richiesto dagli endpoint di setup protetti (es. QR 2FA admin). |
+
+Note operative:
+
+- `TWO_FACTOR_ENABLED`, `CONSENT_ENABLED`, `GOOGLE_OAUTH_ENABLED`, `PASSKEY_ENABLED`, `CONFIRM_LOGOUT` impostano lo stato iniziale; puoi modificarli a caldo via `POST /setup/runtime-config`.
+- Se pubblichi sotto subpath, usa `ISSUER` completo (es. `https://auth.example.com/oauth`) e opzionalmente `BASE_PATH=/oauth`.
+
+### Bootstrap admin
+
+| Variabile | Default | Significato |
+| --- | --- | --- |
+| `ADMIN_USERNAME` | `admin` | Username dell'utente admin seed iniziale. |
+| `ADMIN_PASSWORD` | nessuno | Password admin seed. Obbligatoria e lunga almeno 12 caratteri. |
+| `ADMIN_EMAIL` | `admin@example.local` | Email iniziale admin. |
+
+### Bootstrap client OAuth
+
+| Variabile | Default | Significato |
+| --- | --- | --- |
+| `DEFAULT_CLIENT_ID` | `fileserver-web` | `client_id` del client creato/aggiornato all'avvio. |
+| `DEFAULT_CLIENT_AUTH_METHOD` | `none` | Metodo auth token endpoint (`none` per client pubblico PKCE, altrimenti secret richiesto). |
+| `DEFAULT_CLIENT_SECRET` | nessuno | Secret client. Obbligatorio (>=24 char) se `DEFAULT_CLIENT_AUTH_METHOD != none`. |
+| `DEFAULT_CLIENT_REDIRECT_URIS` | derivate da `ISSUER`/`BASE_PATH` | Redirect URI consentite, separate da virgola. |
+| `DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS` | derivate da `ISSUER`/`BASE_PATH` | Redirect URI post logout consentite, separate da virgola. |
+| `DEFAULT_CLIENT_REDIRECT_URI` | fallback legacy | Alias legacy singolare di `DEFAULT_CLIENT_REDIRECT_URIS` (usato solo se la versione plurale è assente). |
+| `DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URI` | fallback legacy | Alias legacy singolare di `DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS`. |
+
+### Google OAuth (opzionale)
+
+| Variabile | Default | Significato |
+| --- | --- | --- |
+| `GOOGLE_CLIENT_ID` | vuoto | OAuth Client ID Google. |
+| `GOOGLE_CLIENT_SECRET` | vuoto | OAuth Client Secret Google. |
+| `GOOGLE_CALLBACK_PATH` | derivata da `BASE_PATH` (`/auth/google/callback`) | Path di callback gestito dal server. |
+| `GOOGLE_CALLBACK_URL` | derivata da `ISSUER` + `GOOGLE_CALLBACK_PATH` | URL assoluta callback da registrare lato Google Console. |
+
+### Passkey/WebAuthn (opzionale)
+
+| Variabile | Default | Significato |
+| --- | --- | --- |
+| `PASSKEY_RP_NAME` | `Local OAuth2 Server` | Nome relying party mostrato all'utente. |
+| `PASSKEY_RP_ID` | hostname di `ISSUER` | Relying Party ID WebAuthn. |
+| `PASSKEY_ORIGIN` | origin di `ISSUER` | Origin WebAuthn attesa durante challenge/verify. |
+
+### Variabili Docker Compose
+
+Queste variabili sono usate da `docker-compose.yml` (orchestrazione), non dal runtime Node.js:
+
+| Variabile | Default | Significato |
+| --- | --- | --- |
+| `OAUTH_SERVER_CONTAINER_NAME` | `oauth-server` | Nome container. |
+| `OAUTH_SERVER_IMAGE` | `docker.io/andpra70/oauth-server:latest` | Nome/tag immagine. |
+| `OAUTH_SERVER_RESTART` | `unless-stopped` | Policy restart container. |
+| `OAUTH_SERVER_PORT` | `9000` | Porta host esposta verso la porta interna del server. |
+| `OAUTH_SERVER_DATA_VOLUME` | `oauth-server-data` | Nome volume Docker usato per persistenza `data/oauth`. |
 
 Il dato persistente di default usa un volume Docker nominato. In questo modo il contenuto seed copiato in `data/oauth` dentro l'immagine viene inizializzato correttamente nel volume al primo avvio, senza bind mount e senza problemi di permessi host.
 
@@ -93,7 +156,7 @@ Regola pratica:
 
 ### 2) Configura Il Client OIDC Con Le Redirect URI Della Tua App
 
-Nel file `.env` del provider inserisci tutte le callback consentite del client, separate da virgola.
+Inserisci tutte le callback consentite del client nella configurazione runtime del provider (`.env` in locale, `.env.prod` per build Docker), separate da virgola.
 
 Esempio:
 
@@ -162,7 +225,7 @@ http://localhost:9000/auth?client_id=fileserver-web&redirect_uri=http%3A%2F%2Flo
 2. Redirect URI esatta presente in `DEFAULT_CLIENT_REDIRECT_URIS`.
 3. `DEFAULT_CLIENT_AUTH_METHOD=none` per client PKCE pubblico senza secret.
 4. Origin della tua app presente in `ALLOWED_ORIGINS`.
-5. Dopo modifica `.env`, riavvia il container provider.
+5. Dopo modifica della configurazione runtime (`.env` o `.env.prod`), riavvia il provider e ricostruisci l'immagine se usi Docker.
 6. Verifica discovery: `curl http://localhost:9000/.well-known/openid-configuration`.
 
 Script disponibili:
@@ -411,7 +474,7 @@ http://localhost:9000/auth/google/callback
 
 Se usi un dominio o una porta diversa, il valore deve coincidere esattamente con `GOOGLE_CALLBACK_URL`.
 
-7. Copia `Client ID` e `Client Secret` nel file `.env`.
+7. Copia `Client ID` e `Client Secret` nel file di configurazione runtime (`.env` in locale, `.env.prod` per Docker deploy).
 
 Configura queste variabili:
 
@@ -512,8 +575,8 @@ Nota: WebAuthn richiede origin sicuro (`https`) oppure `localhost` in sviluppo.
 - Demo UI integrata: `/app`
 - DB JSON persistente in `./data/oauth/db.json`
 - Stato persistente di `oidc-provider` in `./data/oauth/oidc-store.json`
-- In Docker il volume host `./data/oauth` viene montato in `/app/data`
-- Le variabili runtime sono caricate da `.env`
+- In Docker di default viene usato un volume nominato (`oauth-server-data`) montato in `/app/data/oauth`
+- Le variabili runtime sono caricate da `.env` (nel build Docker viene generato da `.env.prod`)
 - Il client seedato di default usa `client_id=fileserver-web`
 - I redirect URI seedati di default includono `http://localhost:9000/app/callback` e `http://localhost:9000/authWidget/callback`
 - Se `DEFAULT_CLIENT_AUTH_METHOD=none`, lo scambio code -> token usa PKCE senza `client_secret`
