@@ -6,34 +6,6 @@ services:
       dockerfile: Dockerfile
     image: ${OAUTH_SERVER_IMAGE:-docker.io/andpra70/oauth-server:latest}
     restart: ${OAUTH_SERVER_RESTART:-unless-stopped}
-    environment:
-      BASE_PATH: ${BASE_PATH:-}
-      PORT: ${PORT:-9000}
-      ISSUER: ${ISSUER:-http://localhost:9000}
-      TRUST_PROXY: ${TRUST_PROXY:-false}
-      COOKIE_KEYS: ${COOKIE_KEYS}
-      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
-      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.local}
-      DEFAULT_CLIENT_ID: ${DEFAULT_CLIENT_ID:-fileserver-web}
-      DEFAULT_CLIENT_AUTH_METHOD: ${DEFAULT_CLIENT_AUTH_METHOD:-none}
-      DEFAULT_CLIENT_SECRET: ${DEFAULT_CLIENT_SECRET:-secret_key_for_fileserver_web}
-      DEFAULT_CLIENT_REDIRECT_URIS: ${DEFAULT_CLIENT_REDIRECT_URIS:-}
-      DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS: ${DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS:-}
-      SETUP_TOKEN: ${SETUP_TOKEN}
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:9000,http://localhost:8080,http://localhost}
-      TWO_FACTOR_ENABLED: ${TWO_FACTOR_ENABLED:-true}
-      CONSENT_ENABLED: ${CONSENT_ENABLED:-true}
-      GOOGLE_OAUTH_ENABLED: ${GOOGLE_OAUTH_ENABLED:-true}
-      PASSKEY_ENABLED: ${PASSKEY_ENABLED:-false}
-      CONFIRM_LOGOUT: ${CONFIRM_LOGOUT:-true}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      GOOGLE_CALLBACK_PATH: ${GOOGLE_CALLBACK_PATH:-}
-      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-}
-      PASSKEY_RP_NAME: ${PASSKEY_RP_NAME:-Local OAuth2 Server}
-      PASSKEY_RP_ID: ${PASSKEY_RP_ID:-}
-      PASSKEY_ORIGIN: ${PASSKEY_ORIGIN:-}
     ports:
       - "${OAUTH_SERVER_PORT:-9000}:${PORT:-9000}"
     command: ["npm", "start"]
