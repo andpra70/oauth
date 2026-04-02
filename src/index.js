@@ -74,6 +74,29 @@ function normalizeOrigin(value) {
   }
 }
 
+function isCorsOriginAllowed(rawOrigin) {
+  const origin = normalizeOrigin(rawOrigin);
+  if (!origin) return false;
+  if (allowedOriginSet.has(origin)) return true;
+
+  const clients = getClients();
+  for (const client of clients) {
+    const redirectUris = [
+      ...(client?.redirectUris || []),
+      ...(client?.redirect_uris || []),
+      ...(client?.postLogoutRedirectUris || []),
+      ...(client?.post_logout_redirect_uris || []),
+    ];
+    for (const uri of redirectUris) {
+      if (normalizeOrigin(uri) === origin) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function inferRequestProtocol(req) {
   const forwardedProto = String(req.get('x-forwarded-proto') || '').split(',')[0].trim().toLowerCase();
   if (forwardedProto === 'http' || forwardedProto === 'https') return forwardedProto;
@@ -923,7 +946,7 @@ web.get('/health', (_req, res) => {
 
 web.use('/me', (req, res, next) => {
   const origin = normalizeOrigin(req.get('origin') || '');
-  if (origin && allowedOrigins.map(normalizeOrigin).includes(origin)) {
+  if (origin && isCorsOriginAllowed(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
