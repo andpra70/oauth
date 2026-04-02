@@ -277,6 +277,14 @@ function normalizeUriList(value) {
   return uniq(entries.map((item) => String(item || '').trim()).filter(Boolean));
 }
 
+function normalizeStringList(value, {
+  fallback = [],
+} = {}) {
+  const entries = Array.isArray(value) ? value : String(value || '').split(/[\n,]/g);
+  const normalized = uniq(entries.map((item) => String(item || '').trim()).filter(Boolean));
+  return normalized.length > 0 ? normalized : [...fallback];
+}
+
 export function updateClientRedirectUris(clientId, {
   redirectUris = [],
   postLogoutRedirectUris = [],
@@ -323,6 +331,132 @@ export function updateClientRedirectUris(clientId, {
     redirect_uris: client.redirect_uris,
     post_logout_redirect_uris: client.post_logout_redirect_uris,
   };
+}
+
+export function createClient(input = {}) {
+  const clientId = String(input.client_id || '').trim();
+  const tokenEndpointAuthMethod = String(input.token_endpoint_auth_method || 'none').trim() || 'none';
+  const clientSecret = String(input.client_secret || '').trim();
+  const scope = String(input.scope || 'openid profile email offline_access').trim() || 'openid profile email offline_access';
+
+  if (!clientId) {
+    throw new Error('Client ID is required');
+  }
+
+  const allowedAuthMethods = new Set(['none', 'client_secret_post', 'client_secret_basic']);
+  if (!allowedAuthMethods.has(tokenEndpointAuthMethod)) {
+    throw new Error('Unsupported token endpoint auth method');
+  }
+
+  if (tokenEndpointAuthMethod !== 'none' && clientSecret.length < 24) {
+    throw new Error('Client secret must be at least 24 chars long');
+  }
+
+  const redirectUris = normalizeUriList(input.redirect_uris).map((uri) => {
+    try {
+      return new URL(uri).toString();
+    } catch {
+      throw new Error(`Invalid redirect URI: ${uri}`);
+    }
+  });
+  const postLogoutRedirectUris = normalizeUriList(input.post_logout_redirect_uris).map((uri) => {
+    try {
+      return new URL(uri).toString();
+    } catch {
+      throw new Error(`Invalid post logout redirect URI: ${uri}`);
+    }
+  });
+
+  if (redirectUris.length === 0) {
+    throw new Error('At least one redirect URI is required');
+  }
+
+  const grantTypes = normalizeStringList(input.grant_types, {
+    fallback: ['authorization_code', 'refresh_token'],
+  });
+  const responseTypes = normalizeStringList(input.response_types, {
+    fallback: ['code'],
+  });
+
+  const state = loadState();
+  const existing = state.oauth_clients.find((client) => client.client_id === clientId);
+  if (existing) {
+    throw new Error('Client already exists');
+  }
+
+  const client = {
+    client_id: clientId,
+    client_secret: tokenEndpointAuthMethod === 'none' ? '' : clientSecret,
+    redirect_uris: redirectUris,
+    post_logout_redirect_uris: postLogoutRedirectUris,
+    grant_types: grantTypes,
+    response_types: responseTypes,
+    scope,
+    token_endpoint_auth_method: tokenEndpointAuthMethod,
+  };
+
+  state.oauth_clients.push(client);
+  saveState(state);
+  return client;
+}
+
+export function deleteClient(clientId) {
+  const id = String(clientId || '').trim();
+  if (!id) {
+    throw new Error('Client ID is required');
+  }
+
+  const state = loadState();
+  const index = state.oauth_clients.findIndex((client) => client.client_id === id);
+  if (index < 0) {
+    throw new Error('Client not found');
+  }
+
+  const [removed] = state.oauth_clients.splice(index, 1);
+  saveState(state);
+  return removed;
+}
+
+function sanitizeClientRow(row) {
+  if (!row || typeof row !== 'object') return null;
+  const tokenEndpointAuthMethod = row.token_endpoint_auth_method || 'none';
+  return {
+    client_id: String(row.client_id || ''),
+    ...(tokenEndpointAuthMethod !== 'none' && row.client_secret
+      ? { client_secret: row.client_secret }
+      : {}),
+    redirect_uris: Array.isArray(row.redirect_uris) ? row.redirect_uris : [],
+    post_logout_redirect_uris: Array.isArray(row.post_logout_redirect_uris) ? row.post_logout_redirect_uris : [],
+    grant_types: Array.isArray(row.grant_types) ? row.grant_types : [],
+    response_types: Array.isArray(row.response_types) ? row.response_types : [],
+    scope: row.scope,
+    token_endpoint_auth_method: tokenEndpointAuthMethod,
+  };
+}
+
+export function findClientById(clientId) {
+  const id = String(clientId || '').trim();
+  if (!id) return null;
+  const state = loadState();
+  const row = state.oauth_clients.find((client) => client.client_id === id);
+  return sanitizeClientRow(row);
+}
+
+export function upsertClientMetadata(metadata = {}) {
+  const client = sanitizeClientRow(metadata);
+  if (!client?.client_id) {
+    throw new Error('Client ID is required');
+  }
+
+  const state = loadState();
+  const index = state.oauth_clients.findIndex((item) => item.client_id === client.client_id);
+  if (index >= 0) {
+    state.oauth_clients[index] = client;
+  } else {
+    state.oauth_clients.push(client);
+  }
+  saveState(state);
+  return client;
 }
 
 export function findUserByUsername(username) {
@@ -593,22 +727,9 @@ export function upsertGoogleUser(profile) {
 
 export function getClients() {
   const state = loadState();
-  return state.oauth_clients.map((row) => {
-    const tokenEndpointAuthMethod = row.token_endpoint_auth_method || 'none';
-
-    return {
-      client_id: row.client_id,
-      ...(tokenEndpointAuthMethod !== 'none' && row.client_secret
-        ? { client_secret: row.client_secret }
-        : {}),
-      redirect_uris: Array.isArray(row.redirect_uris) ? row.redirect_uris : [],
-      post_logout_redirect_uris: Array.isArray(row.post_logout_redirect_uris) ? row.post_logout_redirect_uris : [],
-      grant_types: Array.isArray(row.grant_types) ? row.grant_types : [],
-      response_types: Array.isArray(row.response_types) ? row.response_types : [],
-      scope: row.scope,
-      token_endpoint_auth_method: tokenEndpointAuthMethod,
-    };
-  });
+  return state.oauth_clients
+    .map((row) => sanitizeClientRow(row))
+    .filter(Boolean);
 }
 
 export function upsertUserPasskey(userId, input) {
