@@ -1,4 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { deleteClient, findClientById, upsertClientMetadata } from './db.js';
 
 const storePath = 'data/oauth/oidc-store.json';
 const storeSeedPath = 'bootstrap-data/oauth/oidc-store.json';
@@ -97,6 +98,15 @@ export class JsonAdapter {
   }
 
   async destroy(id) {
+    if (this.model === 'Client') {
+      try {
+        deleteClient(id);
+      } catch {
+        // Ignore missing clients to mirror adapter contract.
+      }
+      return;
+    }
+
     const store = loadStore();
     const bucket = ensureModelBucket(store, this.model);
     delete bucket[id];
@@ -120,6 +130,11 @@ export class JsonAdapter {
   }
 
   async find(id) {
+    if (this.model === 'Client') {
+      const client = findClientById(id);
+      return client || undefined;
+    }
+
     const store = loadStore();
     const bucket = ensureModelBucket(store, this.model);
     const entry = bucket[id];
@@ -169,6 +184,14 @@ export class JsonAdapter {
   }
 
   async upsert(id, payload, expiresIn) {
+    if (this.model === 'Client') {
+      upsertClientMetadata({
+        ...(payload && typeof payload === 'object' ? payload : {}),
+        client_id: String(id || payload?.client_id || '').trim(),
+      });
+      return;
+    }
+
     const store = loadStore();
     const bucket = ensureModelBucket(store, this.model);
     bucket[id] = {

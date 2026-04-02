@@ -11,7 +11,7 @@ import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import { Provider, errors } from 'oidc-provider';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
-import { clearUserPasskeys, createUser, deleteUser, ensureClientPostLogoutRedirectUri, ensureClientRedirectUri, ensureSchema, findPasskeyByCredentialId, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, touchUserPasskeyCounter, updateClientRedirectUris, updateUser, updateUserProfile, upsertGoogleUser, upsertUserPasskey } from './db.js';
+import { clearUserPasskeys, createClient, createUser, deleteClient, deleteUser, ensureClientPostLogoutRedirectUri, ensureClientRedirectUri, ensureSchema, findPasskeyByCredentialId, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, touchUserPasskeyCounter, updateClientRedirectUris, updateUser, updateUserProfile, upsertGoogleUser, upsertUserPasskey } from './db.js';
 import { findAccount } from './account.js';
 import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderOidcSessionsAdmin, renderPasskeyOnboarding, renderProviderError, renderRedirectConfigAdmin, renderRegister, renderTotpQrSetup, renderUsersAdmin } from './html.js';
 import { ensureOidcStore, JsonAdapter, listOidcStoreOverview, removeOidcRecord, revokeOidcByGrantId, revokeOidcBySessionUid } from './oidc-adapter.js';
@@ -739,7 +739,7 @@ setInterval(() => {
 }, 30_000).unref();
 
 const provider = new Provider(issuer, {
-  clients: getClients(),
+  clients: [],
   pkce: {
     methods: ['S256'],
     required: () => true,
@@ -1182,6 +1182,7 @@ function renderRedirectConfigPage(res, setupToken, {
   notice = '',
   error = '',
   formValues = {},
+  createFormValues = {},
 } = {}) {
   const clients = getClients();
   const selectedClient = clients.find((client) => client.client_id === selectedClientId) || clients[0] || null;
@@ -1193,13 +1194,33 @@ function renderRedirectConfigPage(res, setupToken, {
       ? formValues.post_logout_redirect_uris.join('\n')
       : (formValues.post_logout_redirect_uris ?? (selectedClient?.post_logout_redirect_uris || []).join('\n')),
   };
+  const createValues = {
+    client_id: String(createFormValues.client_id ?? ''),
+    token_endpoint_auth_method: String(createFormValues.token_endpoint_auth_method ?? 'none'),
+    client_secret: String(createFormValues.client_secret ?? ''),
+    scope: String(createFormValues.scope ?? 'openid profile email offline_access'),
+    grant_types: Array.isArray(createFormValues.grant_types)
+      ? createFormValues.grant_types.join('\n')
+      : String(createFormValues.grant_types ?? 'authorization_code\nrefresh_token'),
+    response_types: Array.isArray(createFormValues.response_types)
+      ? createFormValues.response_types.join('\n')
+      : String(createFormValues.response_types ?? 'code'),
+    redirect_uris: Array.isArray(createFormValues.redirect_uris)
+      ? createFormValues.redirect_uris.join('\n')
+      : String(createFormValues.redirect_uris ?? ''),
+    post_logout_redirect_uris: Array.isArray(createFormValues.post_logout_redirect_uris)
+      ? createFormValues.post_logout_redirect_uris.join('\n')
+      : String(createFormValues.post_logout_redirect_uris ?? ''),
+  };
 
   res.type('html').send(renderRedirectConfigAdmin({
     basePath,
     setupToken,
     clients,
     selectedClientId: selectedClient?.client_id || '',
+    selectedClient,
     values,
+    createValues,
     notice,
     error,
   }));
@@ -1267,6 +1288,54 @@ web.post('/setup/config', formParser, (req, res) => {
         redirect_uris: redirectUris,
         post_logout_redirect_uris: postLogoutRedirectUris,
       },
+    });
+  }
+});
+
+web.post('/setup/config/client/create', formParser, (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  const payload = {
+    client_id: String(req.body.client_id || '').trim(),
+    token_endpoint_auth_method: String(req.body.token_endpoint_auth_method || 'none').trim() || 'none',
+    client_secret: String(req.body.client_secret || ''),
+    scope: String(req.body.scope || '').trim(),
+    grant_types: parseUriTextarea(req.body.grant_types),
+    response_types: parseUriTextarea(req.body.response_types),
+    redirect_uris: parseUriTextarea(req.body.redirect_uris),
+    post_logout_redirect_uris: parseUriTextarea(req.body.post_logout_redirect_uris),
+  };
+
+  try {
+    const created = createClient(payload);
+    renderRedirectConfigPage(res, setupToken, {
+      selectedClientId: created.client_id,
+      notice: `Client ${created.client_id} created`,
+    });
+  } catch (error) {
+    renderRedirectConfigPage(res, setupToken, {
+      selectedClientId: String(req.body.client_id || '').trim(),
+      error: error?.message || 'Unable to create client',
+      createFormValues: payload,
+    });
+  }
+});
+
+web.post('/setup/config/client/:id/delete', formParser, (req, res) => {
+  const setupToken = requireSetupToken(req, res);
+  if (!setupToken) return;
+
+  const clientId = String(req.params.id || '').trim();
+  try {
+    deleteClient(clientId);
+    renderRedirectConfigPage(res, setupToken, {
+      notice: `Client ${clientId} deleted`,
+    });
+  } catch (error) {
+    renderRedirectConfigPage(res, setupToken, {
+      selectedClientId: clientId,
+      error: error?.message || 'Unable to delete client',
     });
   }
 });
