@@ -11,19 +11,47 @@ function normalizeBasePath(value) {
   return `/${raw.replace(/^\/+|\/+$/g, '')}`;
 }
 
+function parseUriList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function uniq(values) {
+  return [...new Set(values)];
+}
+
+function normalizeOrigin(value) {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return '';
+  }
+}
+
 function buildDefaultClientUrls() {
   const issuer = process.env.ISSUER || 'http://localhost:9000';
   const issuerUrl = new URL(issuer);
   const basePath = normalizeBasePath(process.env.BASE_PATH || issuerUrl.pathname);
-  const baseUrl = new URL(basePath ? `${basePath}/` : '/', issuerUrl.origin);
-  const callbackApp = new URL('app/callback', baseUrl).toString();
-  const callbackAuthWidget = new URL('authWidget/callback', baseUrl).toString();
-  const postLogoutApp = new URL('app', baseUrl).toString();
-  const postLogoutAuthWidget = new URL('authWidget', baseUrl).toString();
+  const configuredOrigins = parseUriList(process.env.ALLOWED_ORIGINS)
+    .map((value) => normalizeOrigin(value))
+    .filter(Boolean);
+  const origins = uniq([issuerUrl.origin, ...configuredOrigins]);
+  const redirectUris = [];
+  const postLogoutRedirectUris = [];
+
+  for (const origin of origins) {
+    const baseUrl = new URL(basePath ? `${basePath}/` : '/', `${origin}/`);
+    redirectUris.push(new URL('app/callback', baseUrl).toString());
+    redirectUris.push(new URL('authWidget/callback', baseUrl).toString());
+    postLogoutRedirectUris.push(new URL('app', baseUrl).toString());
+    postLogoutRedirectUris.push(new URL('authWidget', baseUrl).toString());
+  }
 
   return {
-    redirectUris: `${callbackApp},${callbackAuthWidget}`,
-    postLogoutRedirectUris: `${postLogoutApp},${postLogoutAuthWidget}`,
+    redirectUris: uniq(redirectUris).join(','),
+    postLogoutRedirectUris: uniq(postLogoutRedirectUris).join(','),
   };
 }
 
@@ -153,14 +181,16 @@ export function seedClientFromEnv() {
   const authMethod = process.env.DEFAULT_CLIENT_AUTH_METHOD || 'none';
   const clientSecret = process.env.DEFAULT_CLIENT_SECRET || '';
   const defaultClientUrls = buildDefaultClientUrls();
-  const redirectUris = (process.env.DEFAULT_CLIENT_REDIRECT_URIS || process.env.DEFAULT_CLIENT_REDIRECT_URI || defaultClientUrls.redirectUris)
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean);
-  const postLogoutRedirectUris = (process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS || process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URI || defaultClientUrls.postLogoutRedirectUris)
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean);
+  const configuredRedirectUris = process.env.DEFAULT_CLIENT_REDIRECT_URIS || process.env.DEFAULT_CLIENT_REDIRECT_URI || '';
+  const configuredPostLogoutRedirectUris = process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URIS || process.env.DEFAULT_CLIENT_POST_LOGOUT_REDIRECT_URI || '';
+  const redirectUris = uniq([
+    ...parseUriList(configuredRedirectUris),
+    ...parseUriList(defaultClientUrls.redirectUris),
+  ]);
+  const postLogoutRedirectUris = uniq([
+    ...parseUriList(configuredPostLogoutRedirectUris),
+    ...parseUriList(defaultClientUrls.postLogoutRedirectUris),
+  ]);
 
   if (authMethod !== 'none' && (!clientSecret || clientSecret.length < 24)) {
     throw new Error('DEFAULT_CLIENT_SECRET must be set and at least 24 chars long');
@@ -186,6 +216,60 @@ export function seedClientFromEnv() {
   }
 
   saveState(state);
+}
+
+export function ensureClientRedirectUri(clientId, redirectUri) {
+  const id = String(clientId || '').trim();
+  const uri = String(redirectUri || '').trim();
+  if (!id || !uri) return false;
+
+  let parsed;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    return false;
+  }
+
+  const normalizedUri = parsed.toString();
+  const state = loadState();
+  const clientIndex = state.oauth_clients.findIndex((item) => item.client_id === id);
+  if (clientIndex < 0) return false;
+
+  const client = state.oauth_clients[clientIndex];
+  const current = Array.isArray(client.redirect_uris) ? client.redirect_uris : [];
+  if (current.includes(normalizedUri)) return false;
+
+  client.redirect_uris = [...current, normalizedUri];
+  state.oauth_clients[clientIndex] = client;
+  saveState(state);
+  return true;
+}
+
+export function ensureClientPostLogoutRedirectUri(clientId, postLogoutRedirectUri) {
+  const id = String(clientId || '').trim();
+  const uri = String(postLogoutRedirectUri || '').trim();
+  if (!id || !uri) return false;
+
+  let parsed;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    return false;
+  }
+
+  const normalizedUri = parsed.toString();
+  const state = loadState();
+  const clientIndex = state.oauth_clients.findIndex((item) => item.client_id === id);
+  if (clientIndex < 0) return false;
+
+  const client = state.oauth_clients[clientIndex];
+  const current = Array.isArray(client.post_logout_redirect_uris) ? client.post_logout_redirect_uris : [];
+  if (current.includes(normalizedUri)) return false;
+
+  client.post_logout_redirect_uris = [...current, normalizedUri];
+  state.oauth_clients[clientIndex] = client;
+  saveState(state);
+  return true;
 }
 
 export function findUserByUsername(username) {
