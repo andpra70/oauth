@@ -31,7 +31,7 @@ COPY --from=build --chown=node:node /app /app
 
 ENV NODE_ENV=production
 ENV PORT=9000
-ENV ISSUER=http://localhost:9000
+ENV ISSUER=https://zanotti.iliadboxos.it:55443/oauth-server
 ENV TRUST_PROXY=false
 
 EXPOSE 9000
