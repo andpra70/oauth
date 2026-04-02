@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import AdminFooterMenu from './AdminFooterMenu.jsx';
 
 export default function OidcSessionsAdminView({ payload, resolvePath }) {
   const {
@@ -35,9 +36,14 @@ export default function OidcSessionsAdminView({ payload, resolvePath }) {
         </div>
         <div className="actions">
           <a className="button-link secondary" href={resolvePath(basePath, `/setup/oidc-sessions${tokenQuery}`)}>Refresh</a>
-          <a className="button-link secondary" href={resolvePath(basePath, '/app')}>Back to app</a>
         </div>
       </section>
+      <AdminFooterMenu
+        basePath={basePath}
+        setupToken={setupToken}
+        resolvePath={resolvePath}
+        active="sessions"
+      />
 
       {notice ? <section className="panel"><div className="message">{notice}</div></section> : null}
       {error ? <section className="panel"><div className="message error">{error}</div></section> : null}

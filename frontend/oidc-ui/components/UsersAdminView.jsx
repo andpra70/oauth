@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import AdminFooterMenu from './AdminFooterMenu.jsx';
 
 export default function UsersAdminView({ payload, resolvePath }) {
   const {
@@ -35,9 +36,14 @@ export default function UsersAdminView({ payload, resolvePath }) {
         </div>
         <div className="actions">
           <a className="button-link secondary" href={resolvePath(basePath, `/setup/users/new${tokenQuery}`)}>Add user</a>
-          <a className="button-link secondary" href={resolvePath(basePath, '/app')}>Back to app</a>
         </div>
       </section>
+      <AdminFooterMenu
+        basePath={basePath}
+        setupToken={setupToken}
+        resolvePath={resolvePath}
+        active="users"
+      />
       <section className="shell">
         <aside className="panel">
           <h2>Users</h2>

@@ -272,6 +272,59 @@ export function ensureClientPostLogoutRedirectUri(clientId, postLogoutRedirectUr
   return true;
 }
 
+function normalizeUriList(value) {
+  const entries = Array.isArray(value) ? value : String(value || '').split(/[\n,]/g);
+  return uniq(entries.map((item) => String(item || '').trim()).filter(Boolean));
+}
+
+export function updateClientRedirectUris(clientId, {
+  redirectUris = [],
+  postLogoutRedirectUris = [],
+} = {}) {
+  const id = String(clientId || '').trim();
+  if (!id) {
+    throw new Error('Client ID is required');
+  }
+
+  const normalizedRedirectUris = normalizeUriList(redirectUris).map((uri) => {
+    try {
+      return new URL(uri).toString();
+    } catch {
+      throw new Error(`Invalid redirect URI: ${uri}`);
+    }
+  });
+
+  const normalizedPostLogoutRedirectUris = normalizeUriList(postLogoutRedirectUris).map((uri) => {
+    try {
+      return new URL(uri).toString();
+    } catch {
+      throw new Error(`Invalid post logout redirect URI: ${uri}`);
+    }
+  });
+
+  if (normalizedRedirectUris.length === 0) {
+    throw new Error('At least one redirect URI is required');
+  }
+
+  const state = loadState();
+  const clientIndex = state.oauth_clients.findIndex((item) => item.client_id === id);
+  if (clientIndex < 0) {
+    throw new Error('Client not found');
+  }
+
+  const client = state.oauth_clients[clientIndex];
+  client.redirect_uris = normalizedRedirectUris;
+  client.post_logout_redirect_uris = normalizedPostLogoutRedirectUris;
+  state.oauth_clients[clientIndex] = client;
+  saveState(state);
+
+  return {
+    client_id: client.client_id,
+    redirect_uris: client.redirect_uris,
+    post_logout_redirect_uris: client.post_logout_redirect_uris,
+  };
+}
+
 export function findUserByUsername(username) {
   const state = loadState();
   return state.users.find((user) => user.username === username);
