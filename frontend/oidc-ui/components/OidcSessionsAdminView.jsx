@@ -13,6 +13,8 @@ export default function OidcSessionsAdminView({ payload, resolvePath }) {
   const tokenQuery = useMemo(() => `?token=${encodeURIComponent(setupToken)}`, [setupToken]);
   const sessions = Array.isArray(store.sessions) ? store.sessions : [];
   const grants = Array.isArray(store.grants) ? store.grants : [];
+  const clientCredentialsTokens = Array.isArray(store.clientCredentialsTokens) ? store.clientCredentialsTokens : [];
+  const clientCredentialsClients = Array.isArray(store.clientCredentialsClients) ? store.clientCredentialsClients : [];
   const recordsByModel = store.recordsByModel && typeof store.recordsByModel === 'object' ? store.recordsByModel : {};
 
   function toIso(ts) {
@@ -55,6 +57,8 @@ export default function OidcSessionsAdminView({ payload, resolvePath }) {
           <div className="meta">
             <div><strong>Sessions:</strong> {Number(store?.totals?.sessions || 0)}</div>
             <div><strong>Grants:</strong> {Number(store?.totals?.grants || 0)}</div>
+            <div><strong>Client credentials tokens:</strong> {Number(store?.totals?.clientCredentialsTokens || 0)}</div>
+            <div><strong>Client credentials clients:</strong> {Number(store?.totals?.clientCredentialsClients || 0)}</div>
           </div>
           <h3 style={{ marginTop: '14px' }}>Models</h3>
           <div className="list">
@@ -70,6 +74,39 @@ export default function OidcSessionsAdminView({ payload, resolvePath }) {
         </aside>
 
         <section className="panel">
+          <h2>Client credentials</h2>
+          {clientCredentialsClients.length === 0 ? <p className="muted">No active client_credentials tokens.</p> : (
+            <div className="list">
+              {clientCredentialsClients.map((item) => (
+                <article key={item.clientId} className="user-link">
+                  <strong>{item.clientId}</strong>
+                  <span>active tokens: {item.tokenCount || 0}</span>
+                  <span>latest expiry: {toIso(item.latestExpiry)}</span>
+                </article>
+              ))}
+            </div>
+          )}
+          {clientCredentialsTokens.length > 0 ? (
+            <>
+              <h3 style={{ marginTop: '14px' }}>Token details</h3>
+              <div className="list">
+                {clientCredentialsTokens.map((token) => (
+                  <article key={token.id} className="user-link">
+                    <strong>{token.id}</strong>
+                    <span>client: {token.clientId || '-'}</span>
+                    <span>scope: {token.scope || '-'}</span>
+                    <span>iat: {toIsoFromSeconds(token.iat)}</span>
+                    <span>exp: {toIsoFromSeconds(token.exp)}</span>
+                    <span>expiresAt: {toIso(token.expiresAt)}</span>
+                    <form method="post" action={resolvePath(basePath, `/setup/oidc-sessions/client-credentials/${encodeURIComponent(token.id)}/revoke${tokenQuery}`)}>
+                      <button className="secondary" type="submit">Revoke token</button>
+                    </form>
+                  </article>
+                ))}
+              </div>
+            </>
+          ) : null}
+
           <h2>Active sessions</h2>
           {sessions.length === 0 ? <p className="muted">No active sessions.</p> : (
             <div className="list">

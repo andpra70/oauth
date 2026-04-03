@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import argon2 from 'argon2';
 import speakeasy from 'speakeasy';
 
@@ -85,7 +86,9 @@ function loadState() {
 }
 
 function saveState(state) {
-  writeFileSync(dbPath, `${JSON.stringify(state, null, 2)}\n`);
+  const tmpPath = `${dbPath}.tmp`;
+  writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}\n`);
+  renameSync(tmpPath, dbPath);
 }
 
 function nowIso() {
@@ -209,11 +212,8 @@ export function seedClientFromEnv() {
   };
 
   const existingIndex = state.oauth_clients.findIndex((item) => item.client_id === clientId);
-  if (existingIndex >= 0) {
-    state.oauth_clients[existingIndex] = client;
-  } else {
-    state.oauth_clients.push(client);
-  }
+  if (existingIndex >= 0) return;
+  state.oauth_clients.push(client);
 
   saveState(state);
 }
@@ -285,6 +285,16 @@ function normalizeStringList(value, {
   return normalized.length > 0 ? normalized : [...fallback];
 }
 
+function normalizeClientKind(value, fallback = 'browser') {
+  const kind = String(value || '').trim().toLowerCase();
+  if (kind === 'browser' || kind === 'application') return kind;
+  return fallback;
+}
+
+function generateApiKey() {
+  return `ak_${randomBytes(24).toString('hex')}`;
+}
+
 export function updateClientRedirectUris(clientId, {
   redirectUris = [],
   postLogoutRedirectUris = [],
@@ -335,21 +345,22 @@ export function updateClientRedirectUris(clientId, {
 
 export function createClient(input = {}) {
   const clientId = String(input.client_id || '').trim();
-  const tokenEndpointAuthMethod = String(input.token_endpoint_auth_method || 'none').trim() || 'none';
-  const clientSecret = String(input.client_secret || '').trim();
+  const clientKind = normalizeClientKind(input.client_kind, 'browser');
   const scope = String(input.scope || 'openid profile email offline_access').trim() || 'openid profile email offline_access';
 
   if (!clientId) {
     throw new Error('Client ID is required');
   }
 
+  const requestedAuthMethod = String(input.token_endpoint_auth_method || '').trim();
+  const tokenEndpointAuthMethod = requestedAuthMethod || (clientKind === 'application' ? 'client_secret_post' : 'none');
   const allowedAuthMethods = new Set(['none', 'client_secret_post', 'client_secret_basic']);
   if (!allowedAuthMethods.has(tokenEndpointAuthMethod)) {
     throw new Error('Unsupported token endpoint auth method');
   }
 
-  if (tokenEndpointAuthMethod !== 'none' && clientSecret.length < 24) {
-    throw new Error('Client secret must be at least 24 chars long');
+  if (clientKind === 'application' && tokenEndpointAuthMethod === 'none') {
+    throw new Error('Application clients require a token endpoint auth method with secret');
   }
 
   const redirectUris = normalizeUriList(input.redirect_uris).map((uri) => {
@@ -367,16 +378,32 @@ export function createClient(input = {}) {
     }
   });
 
-  if (redirectUris.length === 0) {
+  const defaultGrantTypes = clientKind === 'application'
+    ? ['client_credentials']
+    : ['authorization_code', 'refresh_token'];
+  const grantTypes = normalizeStringList(input.grant_types, {
+    fallback: defaultGrantTypes,
+  });
+  if (clientKind === 'application' && !grantTypes.includes('client_credentials')) {
+    grantTypes.push('client_credentials');
+  }
+
+  const responseTypes = normalizeStringList(input.response_types, {
+    fallback: clientKind === 'application' ? [] : ['code'],
+  });
+
+  if (redirectUris.length === 0 && grantTypes.includes('authorization_code')) {
     throw new Error('At least one redirect URI is required');
   }
 
-  const grantTypes = normalizeStringList(input.grant_types, {
-    fallback: ['authorization_code', 'refresh_token'],
-  });
-  const responseTypes = normalizeStringList(input.response_types, {
-    fallback: ['code'],
-  });
+  const candidateApiKey = String(input.api_key || input.client_secret || '').trim();
+  const apiKey = tokenEndpointAuthMethod === 'none'
+    ? ''
+    : (candidateApiKey || (clientKind === 'application' ? generateApiKey() : ''));
+
+  if (tokenEndpointAuthMethod !== 'none' && apiKey.length < 24) {
+    throw new Error('Client secret/API key must be at least 24 chars long');
+  }
 
   const state = loadState();
   const existing = state.oauth_clients.find((client) => client.client_id === clientId);
@@ -386,7 +413,9 @@ export function createClient(input = {}) {
 
   const client = {
     client_id: clientId,
-    client_secret: tokenEndpointAuthMethod === 'none' ? '' : clientSecret,
+    client_secret: tokenEndpointAuthMethod === 'none' ? '' : apiKey,
+    api_key: clientKind === 'application' ? apiKey : '',
+    client_kind: clientKind,
     redirect_uris: redirectUris,
     post_logout_redirect_uris: postLogoutRedirectUris,
     grant_types: grantTypes,
@@ -398,6 +427,93 @@ export function createClient(input = {}) {
   state.oauth_clients.push(client);
   saveState(state);
   return client;
+}
+
+export function updateClient(clientId, input = {}) {
+  const id = String(clientId || '').trim();
+  if (!id) {
+    throw new Error('Client ID is required');
+  }
+
+  const state = loadState();
+  const index = state.oauth_clients.findIndex((client) => client.client_id === id);
+  if (index < 0) {
+    throw new Error('Client not found');
+  }
+
+  const existing = state.oauth_clients[index];
+  const clientKind = normalizeClientKind(input.client_kind, normalizeClientKind(existing.client_kind, 'browser'));
+  const requestedAuthMethod = String(input.token_endpoint_auth_method || '').trim();
+  const tokenEndpointAuthMethod = requestedAuthMethod || (clientKind === 'application' ? 'client_secret_post' : 'none');
+  const allowedAuthMethods = new Set(['none', 'client_secret_post', 'client_secret_basic']);
+  if (!allowedAuthMethods.has(tokenEndpointAuthMethod)) {
+    throw new Error('Unsupported token endpoint auth method');
+  }
+  if (clientKind === 'application' && tokenEndpointAuthMethod === 'none') {
+    throw new Error('Application clients require a token endpoint auth method with secret');
+  }
+
+  const redirectUris = normalizeUriList(input.redirect_uris).map((uri) => {
+    try {
+      return new URL(uri).toString();
+    } catch {
+      throw new Error(`Invalid redirect URI: ${uri}`);
+    }
+  });
+  const postLogoutRedirectUris = normalizeUriList(input.post_logout_redirect_uris).map((uri) => {
+    try {
+      return new URL(uri).toString();
+    } catch {
+      throw new Error(`Invalid post logout redirect URI: ${uri}`);
+    }
+  });
+
+  const defaultGrantTypes = clientKind === 'application'
+    ? ['client_credentials']
+    : ['authorization_code', 'refresh_token'];
+  const grantTypes = normalizeStringList(input.grant_types, {
+    fallback: Array.isArray(existing.grant_types) && existing.grant_types.length > 0
+      ? existing.grant_types
+      : defaultGrantTypes,
+  });
+  if (clientKind === 'application' && !grantTypes.includes('client_credentials')) {
+    grantTypes.push('client_credentials');
+  }
+
+  if (redirectUris.length === 0 && grantTypes.includes('authorization_code')) {
+    throw new Error('At least one redirect URI is required when using authorization_code');
+  }
+
+  const responseTypes = normalizeStringList(input.response_types, {
+    fallback: Array.isArray(existing.response_types) ? existing.response_types : ['code'],
+  });
+
+  const scope = String(input.scope || existing.scope || 'openid profile email offline_access').trim() || 'openid profile email offline_access';
+  const providedSecret = String(input.api_key || input.client_secret || '').trim();
+  const existingSecret = String(existing.client_secret || '').trim();
+  const secret = tokenEndpointAuthMethod === 'none'
+    ? ''
+    : (providedSecret || existingSecret || (clientKind === 'application' ? generateApiKey() : ''));
+  if (tokenEndpointAuthMethod !== 'none' && secret.length < 24) {
+    throw new Error('Client secret/API key must be at least 24 chars long');
+  }
+
+  state.oauth_clients[index] = {
+    ...existing,
+    client_id: id,
+    client_secret: tokenEndpointAuthMethod === 'none' ? '' : secret,
+    api_key: clientKind === 'application' ? secret : '',
+    client_kind: clientKind,
+    redirect_uris: redirectUris,
+    post_logout_redirect_uris: postLogoutRedirectUris,
+    grant_types: grantTypes,
+    response_types: responseTypes,
+    scope,
+    token_endpoint_auth_method: tokenEndpointAuthMethod,
+  };
+
+  saveState(state);
+  return sanitizeClientRow(state.oauth_clients[index]);
 }
 
 export function deleteClient(clientId) {
@@ -420,10 +536,16 @@ export function deleteClient(clientId) {
 function sanitizeClientRow(row) {
   if (!row || typeof row !== 'object') return null;
   const tokenEndpointAuthMethod = row.token_endpoint_auth_method || 'none';
+  const clientKind = normalizeClientKind(row.client_kind, 'browser');
+  const apiKey = String(row.api_key || row.client_secret || '').trim();
   return {
     client_id: String(row.client_id || ''),
+    client_kind: clientKind,
     ...(tokenEndpointAuthMethod !== 'none' && row.client_secret
       ? { client_secret: row.client_secret }
+      : {}),
+    ...(clientKind === 'application' && apiKey
+      ? { api_key: apiKey }
       : {}),
     redirect_uris: Array.isArray(row.redirect_uris) ? row.redirect_uris : [],
     post_logout_redirect_uris: Array.isArray(row.post_logout_redirect_uris) ? row.post_logout_redirect_uris : [],
