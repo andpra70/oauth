@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { deleteClient, findClientById, upsertClientMetadata } from './db.js';
 
 const storePath = 'data/oauth/oidc-store.json';
@@ -37,7 +37,9 @@ function loadStore() {
 }
 
 function saveStore(store) {
-  writeFileSync(storePath, `${JSON.stringify(store, null, 2)}\n`);
+  const tmpPath = `${storePath}.tmp`;
+  writeFileSync(tmpPath, `${JSON.stringify(store, null, 2)}\n`);
+  renameSync(tmpPath, storePath);
 }
 
 function isExpired(entry) {
@@ -68,15 +70,17 @@ function cleanupExpired(store) {
 
 function cleanupExpiredInPlace(store) {
   let changed = false;
+  let removed = 0;
   for (const bucket of Object.values(store.records)) {
     for (const [id, entry] of Object.entries(bucket)) {
       if (isExpired(entry)) {
         delete bucket[id];
         changed = true;
+        removed += 1;
       }
     }
   }
-  return changed;
+  return { changed, removed };
 }
 
 export function ensureOidcStore() {
@@ -225,8 +229,8 @@ export class JsonAdapter {
 
 export function listOidcStoreOverview() {
   const store = loadStore();
-  const changed = cleanupExpiredInPlace(store);
-  if (changed) {
+  const cleanup = cleanupExpiredInPlace(store);
+  if (cleanup.changed) {
     saveStore(store);
   }
 
@@ -236,6 +240,7 @@ export function listOidcStoreOverview() {
   const accessTokenBucket = records.AccessToken && typeof records.AccessToken === 'object' ? records.AccessToken : {};
   const refreshTokenBucket = records.RefreshToken && typeof records.RefreshToken === 'object' ? records.RefreshToken : {};
   const authorizationCodeBucket = records.AuthorizationCode && typeof records.AuthorizationCode === 'object' ? records.AuthorizationCode : {};
+  const clientCredentialsBucket = records.ClientCredentials && typeof records.ClientCredentials === 'object' ? records.ClientCredentials : {};
 
   const tokenCountsBySessionUid = {};
   const grantCountsBySessionUid = {};
@@ -302,16 +307,62 @@ export function listOidcStoreOverview() {
     }))
     .sort((left, right) => (right.expiresAt || 0) - (left.expiresAt || 0));
 
+  const clientCredentialsTokens = Object.entries(clientCredentialsBucket)
+    .map(([id, entry]) => {
+      const payload = entry?.payload || {};
+      return {
+        id,
+        clientId: String(payload.clientId || ''),
+        scope: String(payload.scope || ''),
+        iat: Number(payload.iat || 0) || null,
+        exp: Number(payload.exp || 0) || null,
+        expiresAt: Number(entry?.expiresAt || 0) || null,
+      };
+    })
+    .sort((left, right) => (right.expiresAt || 0) - (left.expiresAt || 0));
+
+  const clientCredentialsByClient = {};
+  for (const token of clientCredentialsTokens) {
+    const key = token.clientId || '-';
+    if (!clientCredentialsByClient[key]) {
+      clientCredentialsByClient[key] = {
+        clientId: key,
+        tokenCount: 0,
+        latestExpiry: 0,
+      };
+    }
+    clientCredentialsByClient[key].tokenCount += 1;
+    clientCredentialsByClient[key].latestExpiry = Math.max(clientCredentialsByClient[key].latestExpiry, Number(token.expiresAt || 0));
+  }
+  const clientCredentialsClients = Object.values(clientCredentialsByClient)
+    .sort((left, right) => {
+      if (right.tokenCount !== left.tokenCount) return right.tokenCount - left.tokenCount;
+      return String(left.clientId).localeCompare(String(right.clientId));
+    });
+
   return {
     generatedAt: new Date().toISOString(),
     totals: {
       sessions: sessions.length,
       grants: grants.length,
+      clientCredentialsTokens: clientCredentialsTokens.length,
+      clientCredentialsClients: clientCredentialsClients.length,
     },
     recordsByModel,
     sessions,
     grants,
+    clientCredentialsTokens,
+    clientCredentialsClients,
   };
+}
+
+export function cleanupExpiredOidcRecords() {
+  const store = loadStore();
+  const cleanup = cleanupExpiredInPlace(store);
+  if (cleanup.changed) {
+    saveStore(store);
+  }
+  return cleanup.removed;
 }
 
 export function removeOidcRecord(model, id) {
@@ -387,4 +438,16 @@ export function revokeOidcBySessionUid(sessionUid) {
     saveStore(store);
   }
   return deleted;
+}
+
+export function revokeClientCredentialsToken(tokenId) {
+  const id = String(tokenId || '').trim();
+  if (!id) return false;
+
+  const store = loadStore();
+  const bucket = ensureModelBucket(store, 'ClientCredentials');
+  if (!bucket[id]) return false;
+  delete bucket[id];
+  saveStore(store);
+  return true;
 }
