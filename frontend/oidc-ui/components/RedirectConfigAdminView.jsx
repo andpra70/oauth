@@ -23,6 +23,9 @@ export default function RedirectConfigAdminView({ payload, resolvePath }) {
   const [tokenTestAccessToken, setTokenTestAccessToken] = useState('');
   const [meTestBusy, setMeTestBusy] = useState(false);
   const [meTestResult, setMeTestResult] = useState('');
+  const [testAuthCode, setTestAuthCode] = useState('');
+  const [testRedirectUri, setTestRedirectUri] = useState('');
+  const [testCodeVerifier, setTestCodeVerifier] = useState('');
   const current = isNew ? null : selectedClient;
   const workingValues = isNew ? createValues : values;
   const clientKind = String(workingValues.client_kind || 'browser');
@@ -87,6 +90,11 @@ export default function RedirectConfigAdminView({ payload, resolvePath }) {
       .split(/\r?\n|,/g)
       .map((item) => item.trim())
       .filter(Boolean);
+  }
+
+  function defaultRedirectUriForTest() {
+    const list = parseLines(workingValues.redirect_uris || '');
+    return list[0] || '';
   }
 
   function validateForm(form) {
@@ -187,17 +195,41 @@ export default function RedirectConfigAdminView({ payload, resolvePath }) {
       : clientSecretValue;
 
     const body = new URLSearchParams();
-    body.set('grant_type', 'client_credentials');
-    if (normalizedScope) body.set('scope', normalizedScope);
     const headers = {
       'content-type': 'application/x-www-form-urlencoded',
     };
 
-    if (authMethodValue === 'client_secret_basic') {
-      headers.authorization = `Basic ${btoa(`${clientId}:${secret}`)}`;
+    if (clientKindValue === 'application') {
+      body.set('grant_type', 'client_credentials');
+      if (normalizedScope) body.set('scope', normalizedScope);
+      if (authMethodValue === 'client_secret_basic') {
+        headers.authorization = `Basic ${btoa(`${clientId}:${secret}`)}`;
+      } else {
+        body.set('client_id', clientId);
+        body.set('client_secret', secret);
+      }
     } else {
+      const code = String(testAuthCode || '').trim();
+      const redirectUri = String(testRedirectUri || '').trim();
+      const codeVerifier = String(testCodeVerifier || '').trim();
+      if (!code) {
+        setLocalError('Per client utente inserisci authorization code per test token.');
+        return;
+      }
+      if (!redirectUri) {
+        setLocalError('Per client utente inserisci redirect_uri per test token.');
+        return;
+      }
+      body.set('grant_type', 'authorization_code');
       body.set('client_id', clientId);
-      body.set('client_secret', secret);
+      body.set('code', code);
+      body.set('redirect_uri', redirectUri);
+      if (codeVerifier) body.set('code_verifier', codeVerifier);
+      if (authMethodValue === 'client_secret_basic') {
+        headers.authorization = `Basic ${btoa(`${clientId}:${secret}`)}`;
+      } else if (authMethodValue !== 'none') {
+        body.set('client_secret', secret);
+      }
     }
 
     setTokenTestBusy(true);
@@ -375,6 +407,9 @@ export default function RedirectConfigAdminView({ payload, resolvePath }) {
     setTokenTestResult('');
     setTokenTestAccessToken('');
     setMeTestResult('');
+    setTestAuthCode('');
+    setTestCodeVerifier('');
+    setTestRedirectUri(defaultRedirectUriForTest());
   }, [isNew, selectedClientId]);
 
   return (
@@ -486,9 +521,6 @@ export default function RedirectConfigAdminView({ payload, resolvePath }) {
                 <button className="secondary" type="button" onClick={runBrowserTokenTest} disabled={tokenTestBusy}>
                   {tokenTestBusy ? 'Test token in corso...' : 'Test token da browser'}
                 </button>
-                <button className="secondary" type="button" onClick={runMeTest} disabled={meTestBusy || !tokenTestAccessToken}>
-                  {meTestBusy ? 'Test /me in corso...' : 'Test /me con token'}
-                </button>
                 <button className="secondary" type="button" onClick={runIntrospectionTest} disabled={meTestBusy || !tokenTestAccessToken}>
                   {meTestBusy ? 'Introspection in corso...' : 'Test introspection token'}
                 </button>
@@ -504,7 +536,39 @@ export default function RedirectConfigAdminView({ payload, resolvePath }) {
               <div><strong>Introspection (`client_secret_basic`):</strong></div>
               <pre>{curlIntrospectionBasic}</pre>
             </div>
-          ) : null}
+          ) : (
+            <div className="meta">
+              <div><strong>Token endpoint:</strong> {tokenEndpoint}</div>
+              <div><strong>Test token client utente:</strong> usa `authorization_code` ottenuto dal flow login.</div>
+              <div className="form-grid">
+                <div className="field full">
+                  <label>authorization_code</label>
+                  <input value={testAuthCode} onChange={(event) => setTestAuthCode(event.target.value)} placeholder="Inserisci code ricevuto dal redirect" />
+                </div>
+                <div className="field full">
+                  <label>redirect_uri</label>
+                  <input value={testRedirectUri} onChange={(event) => setTestRedirectUri(event.target.value)} placeholder="https://app.example/callback" />
+                </div>
+                <div className="field full">
+                  <label>code_verifier (PKCE, opzionale se non usato)</label>
+                  <input value={testCodeVerifier} onChange={(event) => setTestCodeVerifier(event.target.value)} placeholder="code_verifier usato in authorize" />
+                </div>
+              </div>
+              <div className="actions">
+                <button className="secondary" type="button" onClick={runBrowserTokenTest} disabled={tokenTestBusy}>
+                  {tokenTestBusy ? 'Test token in corso...' : 'Test token da browser'}
+                </button>
+                <button className="secondary" type="button" onClick={runMeTest} disabled={meTestBusy || !tokenTestAccessToken}>
+                  {meTestBusy ? 'Test /me in corso...' : 'Test /me con token'}
+                </button>
+                <button className="secondary" type="button" onClick={runIntrospectionTest} disabled={meTestBusy || !tokenTestAccessToken}>
+                  {meTestBusy ? 'Introspection in corso...' : 'Test introspection token'}
+                </button>
+              </div>
+              {tokenTestResult ? <pre>{tokenTestResult}</pre> : null}
+              {meTestResult ? <pre>{meTestResult}</pre> : null}
+            </div>
+          )}
           {!isNew && current?.client_id ? (
             <form
               method="post"

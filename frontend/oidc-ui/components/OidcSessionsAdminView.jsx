@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import AdminFooterMenu from './AdminFooterMenu.jsx';
 
 export default function OidcSessionsAdminView({ payload, resolvePath }) {
@@ -11,6 +11,7 @@ export default function OidcSessionsAdminView({ payload, resolvePath }) {
   } = payload || {};
 
   const tokenQuery = useMemo(() => `?token=${encodeURIComponent(setupToken)}`, [setupToken]);
+  const [viewMode, setViewMode] = useState('sessions');
   const sessions = Array.isArray(store.sessions) ? store.sessions : [];
   const grants = Array.isArray(store.grants) ? store.grants : [];
   const clientCredentialsTokens = Array.isArray(store.clientCredentialsTokens) ? store.clientCredentialsTokens : [];
@@ -60,6 +61,22 @@ export default function OidcSessionsAdminView({ payload, resolvePath }) {
             <div><strong>Client credentials tokens:</strong> {Number(store?.totals?.clientCredentialsTokens || 0)}</div>
             <div><strong>Client credentials clients:</strong> {Number(store?.totals?.clientCredentialsClients || 0)}</div>
           </div>
+          <div className="actions">
+            <button
+              className={viewMode === 'sessions' ? '' : 'secondary'}
+              type="button"
+              onClick={() => setViewMode('sessions')}
+            >
+              Sessioni
+            </button>
+            <button
+              className={viewMode === 'client_credentials' ? '' : 'secondary'}
+              type="button"
+              onClick={() => setViewMode('client_credentials')}
+            >
+              Client credentials
+            </button>
+          </div>
           <h3 style={{ marginTop: '14px' }}>Models</h3>
           <div className="list">
             {Object.keys(recordsByModel).length === 0 ? (
@@ -74,74 +91,80 @@ export default function OidcSessionsAdminView({ payload, resolvePath }) {
         </aside>
 
         <section className="panel">
-          <h2>Client credentials</h2>
-          {clientCredentialsClients.length === 0 ? <p className="muted">No active client_credentials tokens.</p> : (
-            <div className="list">
-              {clientCredentialsClients.map((item) => (
-                <article key={item.clientId} className="user-link">
-                  <strong>{item.clientId}</strong>
-                  <span>active tokens: {item.tokenCount || 0}</span>
-                  <span>latest expiry: {toIso(item.latestExpiry)}</span>
-                </article>
-              ))}
-            </div>
-          )}
-          {clientCredentialsTokens.length > 0 ? (
+          {viewMode === 'client_credentials' ? (
             <>
-              <h3 style={{ marginTop: '14px' }}>Token details</h3>
-              <div className="list">
-                {clientCredentialsTokens.map((token) => (
-                  <article key={token.id} className="user-link">
-                    <strong>{token.id}</strong>
-                    <span>client: {token.clientId || '-'}</span>
-                    <span>scope: {token.scope || '-'}</span>
-                    <span>iat: {toIsoFromSeconds(token.iat)}</span>
-                    <span>exp: {toIsoFromSeconds(token.exp)}</span>
-                    <span>expiresAt: {toIso(token.expiresAt)}</span>
-                    <form method="post" action={resolvePath(basePath, `/setup/oidc-sessions/client-credentials/${encodeURIComponent(token.id)}/revoke${tokenQuery}`)}>
-                      <button className="secondary" type="submit">Revoke token</button>
-                    </form>
-                  </article>
-                ))}
-              </div>
+              <h2>Client credentials</h2>
+              {clientCredentialsClients.length === 0 ? <p className="muted">No active client_credentials tokens.</p> : (
+                <div className="list">
+                  {clientCredentialsClients.map((item) => (
+                    <article key={item.clientId} className="user-link">
+                      <strong>{item.clientId}</strong>
+                      <span>active tokens: {item.tokenCount || 0}</span>
+                      <span>latest expiry: {toIso(item.latestExpiry)}</span>
+                    </article>
+                  ))}
+                </div>
+              )}
+              {clientCredentialsTokens.length > 0 ? (
+                <>
+                  <h3 style={{ marginTop: '14px' }}>Token details</h3>
+                  <div className="list">
+                    {clientCredentialsTokens.map((token) => (
+                      <article key={token.id} className="user-link">
+                        <strong>{token.id}</strong>
+                        <span>client: {token.clientId || '-'}</span>
+                        <span>scope: {token.scope || '-'}</span>
+                        <span>iat: {toIsoFromSeconds(token.iat)}</span>
+                        <span>exp: {toIsoFromSeconds(token.exp)}</span>
+                        <span>expiresAt: {toIso(token.expiresAt)}</span>
+                        <form method="post" action={resolvePath(basePath, `/setup/oidc-sessions/client-credentials/${encodeURIComponent(token.id)}/revoke${tokenQuery}`)}>
+                          <button className="secondary" type="submit">Revoke token</button>
+                        </form>
+                      </article>
+                    ))}
+                  </div>
+                </>
+              ) : null}
             </>
-          ) : null}
+          ) : (
+            <>
+              <h2>Active sessions</h2>
+              {sessions.length === 0 ? <p className="muted">No active sessions.</p> : (
+                <div className="list">
+                  {sessions.map((session) => (
+                    <article key={session.uid || session.id} className="user-link">
+                      <strong>{session.uid || session.id}</strong>
+                      <span>account: {session.accountId || '-'}</span>
+                      <span>clients: {(session.clients || []).join(', ') || '-'}</span>
+                      <span>login: {toIsoFromSeconds(session.loginTs)}</span>
+                      <span>expires: {toIso(session.expiresAt)}</span>
+                      <span>tokens: access {session.accessTokenCount || 0}, refresh {session.refreshTokenCount || 0}, code {session.authorizationCodeCount || 0}</span>
+                      <form method="post" action={resolvePath(basePath, `/setup/oidc-sessions/session/${encodeURIComponent(session.uid || '')}/revoke${tokenQuery}`)}>
+                        <button className="secondary" type="submit">Revoke session</button>
+                      </form>
+                    </article>
+                  ))}
+                </div>
+              )}
 
-          <h2>Active sessions</h2>
-          {sessions.length === 0 ? <p className="muted">No active sessions.</p> : (
-            <div className="list">
-              {sessions.map((session) => (
-                <article key={session.uid || session.id} className="user-link">
-                  <strong>{session.uid || session.id}</strong>
-                  <span>account: {session.accountId || '-'}</span>
-                  <span>clients: {(session.clients || []).join(', ') || '-'}</span>
-                  <span>login: {toIsoFromSeconds(session.loginTs)}</span>
-                  <span>expires: {toIso(session.expiresAt)}</span>
-                  <span>tokens: access {session.accessTokenCount || 0}, refresh {session.refreshTokenCount || 0}, code {session.authorizationCodeCount || 0}</span>
-                  <form method="post" action={resolvePath(basePath, `/setup/oidc-sessions/session/${encodeURIComponent(session.uid || '')}/revoke${tokenQuery}`)}>
-                    <button className="secondary" type="submit">Revoke session</button>
-                  </form>
-                </article>
-              ))}
-            </div>
-          )}
-
-          <h2 style={{ marginTop: '20px' }}>Grants</h2>
-          {grants.length === 0 ? <p className="muted">No active grants.</p> : (
-            <div className="list">
-              {grants.map((grant) => (
-                <article key={grant.id} className="user-link">
-                  <strong>{grant.id}</strong>
-                  <span>account: {grant.accountId || '-'}</span>
-                  <span>client: {grant.clientId || '-'}</span>
-                  <span>linked artifacts: {grant.linkedArtifacts || 0}</span>
-                  <span>expires: {toIso(grant.expiresAt)}</span>
-                  <form method="post" action={resolvePath(basePath, `/setup/oidc-sessions/grant/${encodeURIComponent(grant.id)}/revoke${tokenQuery}`)}>
-                    <button className="secondary" type="submit">Revoke grant</button>
-                  </form>
-                </article>
-              ))}
-            </div>
+              <h2 style={{ marginTop: '20px' }}>Grants</h2>
+              {grants.length === 0 ? <p className="muted">No active grants.</p> : (
+                <div className="list">
+                  {grants.map((grant) => (
+                    <article key={grant.id} className="user-link">
+                      <strong>{grant.id}</strong>
+                      <span>account: {grant.accountId || '-'}</span>
+                      <span>client: {grant.clientId || '-'}</span>
+                      <span>linked artifacts: {grant.linkedArtifacts || 0}</span>
+                      <span>expires: {toIso(grant.expiresAt)}</span>
+                      <form method="post" action={resolvePath(basePath, `/setup/oidc-sessions/grant/${encodeURIComponent(grant.id)}/revoke${tokenQuery}`)}>
+                        <button className="secondary" type="submit">Revoke grant</button>
+                      </form>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </section>
       </section>
