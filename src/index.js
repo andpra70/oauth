@@ -15,6 +15,7 @@ import { clearUserPasskeys, createClient, createUser, deleteClient, deleteUser, 
 import { findAccount } from './account.js';
 import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderOidcSessionsAdmin, renderPasskeyOnboarding, renderProviderError, renderRedirectConfigAdmin, renderRegister, renderTotpQrSetup, renderUsersAdmin } from './html.js';
 import { cleanupExpiredOidcRecords, ensureOidcStore, JsonAdapter, listOidcStoreOverview, removeOidcRecord, revokeClientCredentialsToken, revokeOidcByGrantId, revokeOidcBySessionUid } from './oidc-adapter.js';
+import { createVfsAuthRouter } from './vfs-auth-router.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(__dirname, '..', 'public');
@@ -161,8 +162,7 @@ function hostFromUrl(value) {
 function getGoogleCallbackUrl(req) {
   const requestOrigin = req ? getRequestOrigin(req) : '';
   if (requestOrigin) {
-    const requestBasePath = normalizeBasePath(req.baseUrl || basePath);
-    return new URL(resolvePath(requestBasePath, googleCallbackRoutePath), `${requestOrigin}/`).toString();
+    return new URL(googleCallbackPublicPath, `${requestOrigin}/`).toString();
   }
   if (configuredGoogleCallbackUrl) return configuredGoogleCallbackUrl;
   return new URL(googleCallbackPath, `${issuerUrl.origin}/`).toString();
@@ -231,9 +231,9 @@ const passkeyOnboardingSessions = new Map();
 
 const googleClientId = process.env.GOOGLE_CLIENT_ID || '';
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
-const defaultGoogleCallbackPath = resolvePath(basePath, '/auth/google/callback');
-const googleCallbackPath = process.env.GOOGLE_CALLBACK_PATH || defaultGoogleCallbackPath;
-const googleCallbackRoutePath = stripBasePath(googleCallbackPath, basePath);
+const googleCallbackPublicPath = process.env.GOOGLE_CALLBACK_PATH || '/auth/api/callback';
+const googleCallbackPath = googleCallbackPublicPath;
+const googleCallbackRoutePath = '/auth/google/callback';
 const configuredGoogleCallbackUrl = process.env.GOOGLE_CALLBACK_URL || '';
 const googleConfigured = Boolean(googleClientId && googleClientSecret);
 const configuredPasskeyRpId = process.env.PASSKEY_RP_ID || '';
@@ -946,6 +946,7 @@ app.use(helmet({
 
 const formParser = express.urlencoded({ extended: false });
 const jsonParser = express.json({ limit: '1mb' });
+app.use(await createVfsAuthRouter());
 const web = express.Router();
 
 web.get('/health', (_req, res) => {
@@ -2438,7 +2439,7 @@ web.post('/interaction/:uid/login', formParser, loginLimiter, async (req, res, n
 web.get('/interaction/:uid/login/google', startGoogleAuth);
 web.get('/interaction/:uid/register/google', startGoogleAuth);
 
-web.get(googleCallbackRoutePath, async (req, res, next) => {
+async function handleOidcGoogleCallback(req, res, next) {
   const state = String(req.query.state || '');
   const code = String(req.query.code || '');
   const error = String(req.query.error || '');
@@ -2514,7 +2515,12 @@ web.get(googleCallbackRoutePath, async (req, res, next) => {
 
     next(err);
   }
-});
+}
+
+// Keep the former provider-local callback working, while using the shared
+// public callback already registered for localhost and the deployed domain.
+web.get(googleCallbackRoutePath, handleOidcGoogleCallback);
+app.get('/api/callback', handleOidcGoogleCallback);
 
 web.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, next) => {
   try {
@@ -2672,15 +2678,6 @@ function canAutoRegisterClientUri(req, rawUri) {
 }
 
 web.use('/auth', (req, _res, next) => {
-  const requestOrigin = getRequestOrigin(req);
-  if (requestOrigin && requestOrigin !== issuerUrl.origin) {
-    const canonicalAuthUrl = new URL(resolvePath(basePath, '/auth'), `${issuerUrl.origin}/`);
-    const rawQuery = String(req.url || '').split('?')[1] || '';
-    if (rawQuery) canonicalAuthUrl.search = rawQuery;
-    _res.redirect(307, canonicalAuthUrl.toString());
-    return;
-  }
-
   const clientId = String(req.query.client_id || '').trim();
   const redirectUri = String(req.query.redirect_uri || '').trim();
   if (!clientId || !redirectUri || !canAutoRegisterClientUri(req, redirectUri)) {
@@ -2700,15 +2697,6 @@ web.use('/auth', (req, _res, next) => {
 });
 
 web.use('/session/end', (req, _res, next) => {
-  const requestOrigin = getRequestOrigin(req);
-  if (requestOrigin && requestOrigin !== issuerUrl.origin) {
-    const canonicalSessionEndUrl = new URL(resolvePath(basePath, '/session/end'), `${issuerUrl.origin}/`);
-    const rawQuery = String(req.url || '').split('?')[1] || '';
-    if (rawQuery) canonicalSessionEndUrl.search = rawQuery;
-    _res.redirect(307, canonicalSessionEndUrl.toString());
-    return;
-  }
-
   const clientId = String(req.query.client_id || '').trim();
   const postLogoutRedirectUri = String(req.query.post_logout_redirect_uri || '').trim();
   if (!clientId || !postLogoutRedirectUri || !canAutoRegisterClientUri(req, postLogoutRedirectUri)) {

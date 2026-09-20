@@ -24,15 +24,48 @@ npm run dev
 docker compose up --build
 ```
 
-Nel build Docker, il file `.env.prod` viene copiato dentro l'immagine come `.env`.
-Questo significa che in deploy il server usa la configurazione applicativa di produzione già inclusa nell'immagine.
-
-Il file `./.env` accanto a `docker-compose.yml` resta utile per le variabili del compose (es. immagine, porta host, volume), non per i secret applicativi runtime.
+L'immagine Docker non incorpora file `.env` né credenziali. Passa sempre secret e
+configurazione tramite l'ambiente runtime (per esempio il file `.env` letto da
+Docker Compose) e non versionare valori reali in `.env.prod`.
 
 ## Configurazione `.env`
 
-L'app carica le variabili da `.env` tramite `dotenv`.
-In locale usa tipicamente `.env` (copiato da `.env.example`), mentre nell'immagine Docker il `.env` deriva da `.env.prod`.
+L'app carica le variabili da `.env` tramite `dotenv`. In locale usa tipicamente
+un `.env` copiato da `.env.example`; nel container riceve le variabili da Compose.
+
+## Compatibilita con le applicazioni VFS2
+
+Lo stesso processo espone anche il servizio di autenticazione usato dalle app
+VFS2. Il front controller pubblica questi endpoint sotto `/auth`:
+
+- `GET /auth/widget.js`: widget da includere nelle applicazioni;
+- `GET /auth/api/login`: avvia Google OAuth;
+- `GET /auth/api/callback`: callback Google da registrare nella console Google;
+- `POST /auth/api/refresh` e `POST /auth/api/logout`: gestione sessione;
+- `GET /auth/admin/`: console amministrativa VFS2.
+
+Il prefisso `/auth` e applicato dal reverse proxy: direttamente sulla porta 9000
+gli stessi endpoint sono rispettivamente `/widget.js`, `/api/*` e `/admin/*`.
+Le applicazioni esistenti possono quindi continuare a caricare lo script relativo
+`/auth/widget.js` senza modifiche.
+
+La chiave privata RS256 deve essere montata in runtime e deve corrispondere alla
+chiave pubblica configurata in VFS2. Il compose di esempio la monta da
+`./keys/private.pem`, file escluso da Git.
+
+Variabili principali del router compatibile:
+
+| Variabile | Default | Significato |
+| --- | --- | --- |
+| `MONGO_URI` | Mongo locale del compose | Database utenti, sessioni, refresh token e audit. |
+| `REDIS_URL` | Redis locale del compose | Revoche e stato sessione condiviso. |
+| `VFS_GOOGLE_CLIENT_ID` | `GOOGLE_CLIENT_ID` | Client Google del widget VFS2. |
+| `VFS_GOOGLE_CLIENT_SECRET` | `GOOGLE_CLIENT_SECRET` | Secret Google del widget VFS2. |
+| `VFS_GOOGLE_CALLBACK_URL` | URL locale | Callback principale, in produzione `https://<host>/auth/api/callback`. |
+| `VFS_GOOGLE_CALLBACK_URLS` | callback principale | Lista delle callback ammesse. |
+| `VFS_JWT_ISSUER` | `vfs-auth` | Issuer dei JWT consumati da VFS2. |
+| `VFS_JWT_AUDIENCE` | `vfs-clients` | Audience dei JWT consumati da VFS2. |
+| `VFS_PRIVATE_KEY_PATH` | nessuno | Percorso della chiave privata RS256 montata. |
 
 ### Variabili applicative (runtime server)
 
@@ -78,7 +111,7 @@ Note operative:
 | --- | --- | --- |
 | `GOOGLE_CLIENT_ID` | vuoto | OAuth Client ID Google. |
 | `GOOGLE_CLIENT_SECRET` | vuoto | OAuth Client Secret Google. |
-| `GOOGLE_CALLBACK_PATH` | derivata da `BASE_PATH` (`/auth/google/callback`) | Path di callback gestito dal server. |
+| `GOOGLE_CALLBACK_PATH` | `/auth/api/callback` | Path pubblico condiviso della callback Google. |
 | `GOOGLE_CALLBACK_URL` | derivata da `ISSUER` + `GOOGLE_CALLBACK_PATH` | URL assoluta callback da registrare lato Google Console. |
 
 ### Passkey/WebAuthn (opzionale)
@@ -476,8 +509,8 @@ Configura queste variabili:
 ```bash
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
-GOOGLE_CALLBACK_PATH=/auth/google/callback
-GOOGLE_CALLBACK_URL=http://localhost:9000/auth/google/callback
+GOOGLE_CALLBACK_PATH=/auth/api/callback
+GOOGLE_CALLBACK_URL=http://localhost:9000/auth/api/callback
 ```
 
 Note operative:

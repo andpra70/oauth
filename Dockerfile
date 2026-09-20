@@ -16,7 +16,6 @@ COPY vite.config.js ./vite.config.js
 COPY data/oauth ./data/oauth
 COPY data/oauth ./bootstrap-data/oauth
 COPY .env.example ./.env.example
-COPY .env.prod ./.env
 
 RUN npm run ui:build \
   && npm prune --omit=dev \
