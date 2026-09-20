@@ -23,6 +23,7 @@ const required = (name, fallbackName) => {
 
 export async function createVfsAuthRouter() {
   const callback = required('VFS_GOOGLE_CALLBACK_URL');
+  const configuredOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean);
   const cfg = {
     mongo: required('MONGO_URI'),
     redis: required('REDIS_URL'),
@@ -36,7 +37,11 @@ export async function createVfsAuthRouter() {
     refreshSeconds: Number(process.env.VFS_REFRESH_TOKEN_SECONDS || process.env.REFRESH_TOKEN_SECONDS || 2592000),
     cookieSecure: process.env.COOKIE_SECURE !== 'false',
     adminSubs: new Set((process.env.ADMIN_GOOGLE_SUBS || '').split(',').map((value) => value.trim()).filter(Boolean)),
-    origins: (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean),
+    origins: [...new Set([
+      ...configuredOrigins,
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+    ])],
   };
   const privateKey = fs.readFileSync(process.env.VFS_PRIVATE_KEY_PATH || process.env.PRIVATE_KEY_PATH || '/run/secrets/private.pem', 'utf8');
   const redis = createClient({ url: cfg.redis });
@@ -53,6 +58,16 @@ export async function createVfsAuthRouter() {
   const callbackFor = (req) => {
     const candidate = `${req.protocol}://${req.get('host')}/auth/api/callback`;
     return cfg.callbacks.has(candidate) ? candidate : cfg.callback;
+  };
+  const safeReturnTo = (value) => {
+    const candidate = String(value || '').trim();
+    if (candidate.startsWith('/') && !candidate.startsWith('//')) return candidate;
+    try {
+      const parsed = new URL(candidate);
+      return cfg.origins.includes(parsed.origin) ? parsed.toString() : '/example/';
+    } catch {
+      return '/example/';
+    }
   };
   const issueAccess = (user, session) => {
     const jti = crypto.randomUUID();
@@ -104,8 +119,7 @@ export async function createVfsAuthRouter() {
   router.use('/admin', express.static(path.join(publicDir, 'admin'), { index: 'index.html', maxAge: 0 }));
   router.get('/api/login', (req, res) => {
     const resolvedCallback = callbackFor(req);
-    const requestedReturnTo = String(req.query.return_to || '/example/');
-    const returnTo = requestedReturnTo.startsWith('/') && !requestedReturnTo.startsWith('//') ? requestedReturnTo : '/example/';
+    const returnTo = safeReturnTo(req.query.return_to || '/example/');
     const state = random();
     res.cookie('oauth_state', state, { ...cookieOptions, path: '/auth/api/callback', maxAge: 600000 });
     res.cookie('oauth_return_to', returnTo, { ...cookieOptions, path: '/auth/api/callback', maxAge: 600000 });
@@ -133,9 +147,10 @@ export async function createVfsAuthRouter() {
     const refresh = await createRefresh(user, session);
     res.cookie('vfs_refresh', refresh.raw, cookieOptions);
     res.clearCookie('oauth_state', { path: '/auth/api/callback' });
-    const returnTo = String(req.cookies.oauth_return_to || '/example/');
+    const returnTo = safeReturnTo(req.cookies.oauth_return_to || '/example/');
     res.clearCookie('oauth_return_to', { path: '/auth/api/callback' });
-    return res.redirect(`${new URL(resolvedCallback).origin}${returnTo}`);
+    const destination = returnTo.startsWith('/') ? `${new URL(resolvedCallback).origin}${returnTo}` : returnTo;
+    return res.redirect(destination);
   } catch (error) { return next(error); } });
   router.post('/api/refresh', async (req, res, next) => { try {
     const raw = req.cookies.vfs_refresh;
