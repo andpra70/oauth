@@ -3,6 +3,14 @@ import react from '@vitejs/plugin-react';
 import { resolve } from 'node:path';
 
 export default defineConfig({
+  preview: {
+    host: '0.0.0.0',
+    allowedHosts: true,
+  },
+  server: {
+    host: '0.0.0.0',
+    allowedHosts: true,
+  },
   plugins: [react()],
   publicDir: false,
   build: {
