@@ -13,6 +13,7 @@ COPY src ./src
 COPY public ./public
 COPY frontend ./frontend
 COPY vite.config.js ./vite.config.js
+COPY vite.profile-widget.config.js ./vite.profile-widget.config.js
 COPY data/oauth ./data/oauth
 COPY data/oauth ./bootstrap-data/oauth
 COPY .env.example ./.env.example

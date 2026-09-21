@@ -15,7 +15,7 @@ import { clearUserPasskeys, createClient, createUser, deleteClient, deleteUser, 
 import { findAccount } from './account.js';
 import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderOidcSessionsAdmin, renderPasskeyOnboarding, renderProviderError, renderRedirectConfigAdmin, renderRegister, renderTotpQrSetup, renderUsersAdmin } from './html.js';
 import { cleanupExpiredOidcRecords, ensureOidcStore, JsonAdapter, listOidcStoreOverview, removeOidcRecord, revokeClientCredentialsToken, revokeOidcByGrantId, revokeOidcBySessionUid } from './oidc-adapter.js';
-import { createVfsAuthRouter } from './vfs-auth-router.js';
+import { createVfsAuthRouter, missingVfsAuthConfig } from './vfs-auth-router.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(__dirname, '..', 'public');
@@ -160,11 +160,11 @@ function hostFromUrl(value) {
 }
 
 function getGoogleCallbackUrl(req) {
+  if (configuredGoogleCallbackUrl) return configuredGoogleCallbackUrl;
   const requestOrigin = req ? getRequestOrigin(req) : '';
   if (requestOrigin) {
     return new URL(googleCallbackPublicPath, `${requestOrigin}/`).toString();
   }
-  if (configuredGoogleCallbackUrl) return configuredGoogleCallbackUrl;
   return new URL(googleCallbackPath, `${issuerUrl.origin}/`).toString();
 }
 
@@ -946,11 +946,24 @@ app.use(helmet({
 
 const formParser = express.urlencoded({ extended: false });
 const jsonParser = express.json({ limit: '1mb' });
-app.use(await createVfsAuthRouter());
+const vfsAuthMode = String(process.env.VFS_AUTH_ENABLED || 'auto').trim().toLowerCase();
+const missingVfsConfig = missingVfsAuthConfig();
+if (vfsAuthMode === 'true' && missingVfsConfig.length > 0) {
+  throw new Error(`VFS auth enabled but configuration is missing: ${missingVfsConfig.join(', ')}`);
+}
+if (vfsAuthMode !== 'false' && missingVfsConfig.length === 0) {
+  app.use(await createVfsAuthRouter());
+} else if (vfsAuthMode !== 'false') {
+  console.warn(`[vfs-auth] disabled: missing ${missingVfsConfig.join(', ')}`);
+}
 const web = express.Router();
 
 web.get('/health', (_req, res) => {
   res.json({ ok: true, issuer });
+});
+
+web.get('/profile-widget.js', (_req, res) => {
+  res.sendFile(join(publicDir, 'profile-widget.js'));
 });
 
 web.use('/me', (req, res, next) => {

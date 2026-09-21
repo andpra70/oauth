@@ -7,36 +7,49 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { OAuth2Client } from 'google-auth-library';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { createClient } from 'redis';
 import { VfsAudit, VfsRefreshToken, VfsSession, VfsUser } from './vfs-auth-models.js';
+import { parseProfileUpdate, serializeProfile } from './profile-model.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(here, '../public/vfs-auth');
+const profileWidgetPath = path.join(here, '../public/profile-widget.js');
 const required = (name, fallbackName) => {
   const value = process.env[name] || (fallbackName ? process.env[fallbackName] : '');
   if (!value) throw new Error(`Missing ${name}`);
   return value;
 };
 
+export function missingVfsAuthConfig(env = process.env) {
+  const requiredValues = [
+    ['MONGO_URI', env.MONGO_URI],
+    ['REDIS_URL', env.REDIS_URL],
+  ];
+  const missing = requiredValues.filter(([, value]) => !String(value || '').trim()).map(([name]) => name);
+  const keyPath = env.VFS_PRIVATE_KEY_PATH || env.PRIVATE_KEY_PATH || '/run/secrets/private.pem';
+  if (!fs.existsSync(keyPath)) missing.push('VFS_PRIVATE_KEY_PATH');
+  return missing;
+}
+
 export async function createVfsAuthRouter() {
-  const callback = required('VFS_GOOGLE_CALLBACK_URL');
   const configuredOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean);
+  const oidcIssuer = String(process.env.ISSUER || `http://localhost:${process.env.PORT || 9000}`).replace(/\/+$/, '');
+  const issuerUrl = new URL(oidcIssuer);
+  const internalOidcBase = `http://127.0.0.1:${process.env.PORT || 9000}${issuerUrl.pathname === '/' ? '' : issuerUrl.pathname}`.replace(/\/+$/, '');
   const cfg = {
     mongo: required('MONGO_URI'),
     redis: required('REDIS_URL'),
-    clientId: required('VFS_GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_ID'),
-    clientSecret: required('VFS_GOOGLE_CLIENT_SECRET', 'GOOGLE_CLIENT_SECRET'),
-    callback,
-    callbacks: new Set((process.env.VFS_GOOGLE_CALLBACK_URLS || callback).split(',').map((value) => value.trim()).filter(Boolean)),
+    oidcIssuer,
+    internalOidcBase,
+    oidcClientId: process.env.DEFAULT_CLIENT_ID || 'fileserver-web',
     issuer: process.env.VFS_JWT_ISSUER || process.env.JWT_ISSUER || 'vfs-auth',
     audience: process.env.VFS_JWT_AUDIENCE || process.env.JWT_AUDIENCE || 'vfs-clients',
     accessSeconds: Number(process.env.VFS_ACCESS_TOKEN_SECONDS || process.env.ACCESS_TOKEN_SECONDS || 600),
     refreshSeconds: Number(process.env.VFS_REFRESH_TOKEN_SECONDS || process.env.REFRESH_TOKEN_SECONDS || 2592000),
     cookieSecure: process.env.COOKIE_SECURE !== 'false',
-    adminSubs: new Set((process.env.ADMIN_GOOGLE_SUBS || '').split(',').map((value) => value.trim()).filter(Boolean)),
+    adminUsername: process.env.ADMIN_USERNAME || 'admin',
     origins: [...new Set([
       ...configuredOrigins,
       'http://localhost:5173',
@@ -49,17 +62,20 @@ export async function createVfsAuthRouter() {
   if (mongoose.connection.readyState === 0) await mongoose.connect(cfg.mongo);
   if (!redis.isOpen) await redis.connect();
 
-  const google = new OAuth2Client(cfg.clientId);
   const router = express.Router();
   const sha = (value) => crypto.createHash('sha256').update(value).digest('hex');
   const random = () => crypto.randomBytes(48).toString('base64url');
-  const stateKey = (state) => `auth:google:state:${state}`;
+  const stateKey = (state) => `auth:oidc:state:${state}`;
   const ticketKey = (ticket) => `auth:exchange:ticket:${ticket}`;
   const maskIp = (ip) => String(ip || '').replace(/\d+$/, '0').slice(0, 80);
   const cookieOptions = { httpOnly: true, secure: cfg.cookieSecure, sameSite: 'none', path: '/auth/api', maxAge: cfg.refreshSeconds * 1000 };
   const callbackFor = (req) => {
     const candidate = `${req.protocol}://${req.get('host')}/auth/api/callback`;
-    return cfg.callbacks.has(candidate) ? candidate : cfg.callback;
+    const candidateUrl = new URL(candidate);
+    const candidateOrigin = candidateUrl.origin;
+    const isLocal = candidateUrl.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(candidateUrl.hostname);
+    if (cfg.origins.includes(candidateOrigin) || isLocal || candidateOrigin === issuerUrl.origin) return candidate;
+    return `${issuerUrl.origin}/auth/api/callback`;
   };
   const safeReturnTo = (value) => {
     const candidate = String(value || '').trim();
@@ -116,19 +132,50 @@ export async function createVfsAuthRouter() {
   const admin = [bearer, (req, res, next) => req.auth.user.role === 'admin' ? next() : res.status(403).json({ error: 'admin_required' })];
   const audit = (req, action, target, reason) => VfsAudit.create({ actorUserId: req.auth?.user?._id, action, target, reason, ip: maskIp(req.ip), userAgent: String(req.get('user-agent') || '').slice(0, 200), expiresAt: new Date(Date.now() + 180 * 86400000) });
 
+  router.use((req, _res, next) => {
+    if (req.url === '/auth/me' || req.url.startsWith('/auth/me?')) {
+      req.url = `/profile/me${req.url.slice('/auth/me'.length)}`;
+    } else if (
+      req.url.startsWith('/auth/api/')
+      || req.url === '/auth/widget.js'
+      || req.url === '/auth/profile-widget.js'
+      || req.url === '/auth/admin'
+      || req.url.startsWith('/auth/admin/')
+    ) {
+      req.url = req.url.slice('/auth'.length);
+    }
+    next();
+  });
   router.use(compression(), cookieParser(), express.json({ limit: '64kb' }));
   router.use(cors({ origin(origin, done) { done(null, !origin || cfg.origins.includes(origin)); }, credentials: true }));
-  router.use('/api', rateLimit({ windowMs: 60000, limit: 120, standardHeaders: true, legacyHeaders: false }));
+  router.use(['/api', '/profile/me'], rateLimit({ windowMs: 60000, limit: 120, standardHeaders: true, legacyHeaders: false }));
   router.get('/healthz', (_req, res) => res.json({ status: 'ok', service: 'vfs-auth' }));
   router.get('/widget.js', (_req, res) => res.sendFile(path.join(publicDir, 'auth-widget.js')));
+  router.get('/profile-widget.js', (_req, res) => res.sendFile(profileWidgetPath));
+  router.get('/profile/me', bearer, (req, res) => res.json(serializeProfile(req.auth.user)));
+  router.put('/profile/me', bearer, async (req, res, next) => { try {
+    Object.assign(req.auth.user, parseProfileUpdate(req.body));
+    await req.auth.user.save();
+    return res.json(serializeProfile(req.auth.user));
+  } catch (error) { return next(error); } });
   router.use('/admin', express.static(path.join(publicDir, 'admin'), { index: 'index.html', maxAge: 0 }));
   router.get('/api/login', async (req, res, next) => { try {
     const resolvedCallback = callbackFor(req);
     const returnTo = safeReturnTo(req.query.return_to || '/example/');
     const state = `vfs.${random()}`;
-    await redis.set(stateKey(state), JSON.stringify({ flow: 'vfs', returnTo, callback: resolvedCallback }), { EX: 600 });
-    const params = new URLSearchParams({ client_id: cfg.clientId, redirect_uri: resolvedCallback, response_type: 'code', scope: 'openid email profile', state, prompt: 'select_account' });
-    res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+    const verifier = random();
+    const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+    await redis.set(stateKey(state), JSON.stringify({ flow: 'vfs-oidc', returnTo, callback: resolvedCallback, verifier }), { EX: 600 });
+    const params = new URLSearchParams({
+      client_id: cfg.oidcClientId,
+      redirect_uri: resolvedCallback,
+      response_type: 'code',
+      scope: 'openid email profile',
+      state,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+    });
+    res.redirect(`${cfg.oidcIssuer}/auth?${params}`);
   } catch (error) { next(error); } });
   router.get('/api/callback', async (req, res, next) => { try {
     const state = String(req.query.state || '');
@@ -138,18 +185,33 @@ export async function createVfsAuthRouter() {
     const pendingRaw = await redis.getDel(stateKey(state));
     if (!pendingRaw) return res.status(400).send('Invalid or expired OAuth state');
     const pendingLogin = JSON.parse(pendingRaw);
-    if (pendingLogin.flow !== 'vfs') return res.status(400).send('Invalid OAuth state');
+    if (pendingLogin.flow !== 'vfs-oidc') return res.status(400).send('Invalid OAuth state');
     if (!req.query.code) return res.status(400).send('Invalid OAuth state');
     const resolvedCallback = pendingLogin.callback;
-    const body = new URLSearchParams({ code: String(req.query.code), client_id: cfg.clientId, client_secret: cfg.clientSecret, redirect_uri: resolvedCallback, grant_type: 'authorization_code' });
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
-    if (!tokenResponse.ok) throw new Error('Google token exchange failed');
-    const googleTokens = await tokenResponse.json();
-    const ticket = await google.verifyIdToken({ idToken: googleTokens.id_token, audience: cfg.clientId });
-    const payload = ticket.getPayload();
-    if (!payload?.sub || !payload.email_verified) throw new Error('Invalid Google identity');
-    const role = cfg.adminSubs.has(payload.sub) ? 'admin' : 'user';
-    const user = await VfsUser.findOneAndUpdate({ googleSub: payload.sub }, { email: payload.email, emailVerified: true, name: payload.name, picture: payload.picture, role, lastSeenAt: new Date() }, { upsert: true, new: true });
+    const body = new URLSearchParams({
+      code: String(req.query.code),
+      client_id: cfg.oidcClientId,
+      redirect_uri: resolvedCallback,
+      grant_type: 'authorization_code',
+      code_verifier: pendingLogin.verifier,
+    });
+    const tokenResponse = await fetch(`${cfg.internalOidcBase}/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
+    const oidcTokens = await tokenResponse.json().catch(() => ({}));
+    if (!tokenResponse.ok || !oidcTokens.access_token) throw new Error(`OIDC token exchange failed: ${oidcTokens.error || tokenResponse.status}`);
+    const profileResponse = await fetch(`${cfg.internalOidcBase}/me`, { headers: { authorization: `Bearer ${oidcTokens.access_token}` } });
+    const payload = await profileResponse.json().catch(() => ({}));
+    if (!profileResponse.ok || !payload.sub || !payload.email) throw new Error('Invalid OIDC identity');
+    const role = payload.preferred_username === cfg.adminUsername ? 'admin' : 'user';
+    let user = await VfsUser.findOne({ $or: [{ googleSub: payload.sub }, { email: payload.email }] });
+    if (!user) user = new VfsUser({ googleSub: payload.sub, email: payload.email });
+    user.googleSub = payload.sub;
+    user.email = payload.email;
+    user.emailVerified = true;
+    user.name = payload.preferred_username || payload.email;
+    user.picture = payload.picture || '';
+    user.role = role;
+    user.lastSeenAt = new Date();
+    await user.save();
     const sid = crypto.randomUUID();
     const familyId = crypto.randomUUID();
     const session = await VfsSession.create({ userId: user._id, sid, familyId, expiresAt: new Date(Date.now() + cfg.refreshSeconds * 1000), lastSeenAt: new Date(), userAgent: String(req.get('user-agent') || '').slice(0, 200), ip: maskIp(req.ip) });

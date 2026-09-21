@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { appPath, issuerEndpoint, resolveBrowserUrl } from '../shared/api.js';
+import ProfileWidgetDemo from './ProfileWidgetDemo.jsx';
 
 const storageKey = 'oauth-console.pkce';
 
@@ -352,6 +353,8 @@ export default function App() {
           gestisce il callback, scambia il code con i token e mostra il QR TOTP dell'utente admin.
         </p>
       </section>
+
+      <ProfileWidgetDemo />
 
       <section className="grid">
         <section className="panel">

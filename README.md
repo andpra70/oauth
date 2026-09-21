@@ -39,6 +39,8 @@ Lo stesso processo espone anche il servizio di autenticazione usato dalle app
 VFS2. Il front controller pubblica questi endpoint sotto `/auth`:
 
 - `GET /auth/widget.js`: widget da includere nelle applicazioni;
+- `GET /auth/profile-widget.js`: widget React condiviso per login e profilo;
+- `GET /auth/me` e `PUT /auth/me`: lettura e aggiornamento del profilo autenticato;
 - `GET /auth/api/login`: avvia Google OAuth;
 - `GET /auth/api/callback`: callback Google da registrare nella console Google;
 - `POST /auth/api/exchange`: scambia il ticket monouso quando il client gira su un origin locale;
@@ -50,8 +52,40 @@ gli stessi endpoint sono rispettivamente `/widget.js`, `/api/*` e `/admin/*`.
 Le applicazioni esistenti possono quindi continuare a caricare lo script relativo
 `/auth/widget.js` senza modifiche.
 
-Lo stato del login Google VFS viene conservato in Redis per 10 minuti ed è
-consumato atomicamente dalla callback. Quando `return_to` appartiene a un origin
+### Widget profilo condiviso
+
+Il widget usa automaticamente `VfsAuth`, caricandolo se necessario, e mantiene
+isolati markup e stili tramite Shadow DOM:
+
+```html
+<script src="/auth/profile-widget.js"></script>
+<profile-widget></profile-widget>
+```
+
+In alternativa puo essere montato e controllato da JavaScript:
+
+```html
+<script>
+  window.__PROFILE_WIDGET_CONFIG__ = { autoMount: true };
+</script>
+<script src="/auth/profile-widget.js"></script>
+<script>
+  ProfileWidget.open();
+  // ProfileWidget.close();
+  // ProfileWidget.unmount();
+</script>
+```
+
+Su context personalizzati si possono impostare `apiBase` e `authWidgetUrl` nella
+configurazione globale oppure tramite gli attributi omonimi dell'elemento. Il
+widget non contiene hostname fissi. L'immagine proviene dal profilo Google;
+nome, cognome e nota sono salvati sul documento utente tramite `/auth/me`.
+
+Il login VFS usa Authorization Code + PKCE sul provider OIDC principale. Google,
+quando scelto nella schermata del provider, usa quindi le sole variabili
+`GOOGLE_CLIENT_ID` e `GOOGLE_CLIENT_SECRET`. Lo stato OIDC del bridge VFS viene
+conservato in Redis per 10 minuti ed è consumato atomicamente dalla callback.
+Quando `return_to` appartiene a un origin
 diverso dalla callback pubblica (per esempio `http://localhost:5173`), il server
 reindirizza il browser con un `auth_ticket` monouso valido 90 secondi. Il widget
 lo rimuove subito dall'URL, lo scambia automaticamente e gestisce il refresh
@@ -65,12 +99,9 @@ Variabili principali del router compatibile:
 
 | Variabile | Default | Significato |
 | --- | --- | --- |
+| `VFS_AUTH_ENABLED` | `auto` | `auto` abilita le API VFS solo con configurazione completa; `true` rende obbligatorie tutte le variabili; `false` le disabilita. |
 | `MONGO_URI` | Mongo locale del compose | Database utenti, sessioni, refresh token e audit. |
 | `REDIS_URL` | Redis locale del compose | Revoche e stato sessione condiviso. |
-| `VFS_GOOGLE_CLIENT_ID` | `GOOGLE_CLIENT_ID` | Client Google del widget VFS2. |
-| `VFS_GOOGLE_CLIENT_SECRET` | `GOOGLE_CLIENT_SECRET` | Secret Google del widget VFS2. |
-| `VFS_GOOGLE_CALLBACK_URL` | URL locale | Callback principale, in produzione `https://<host>/auth/api/callback`. |
-| `VFS_GOOGLE_CALLBACK_URLS` | callback principale | Lista delle callback ammesse. |
 | `VFS_JWT_ISSUER` | `vfs-auth` | Issuer dei JWT consumati da VFS2. |
 | `VFS_JWT_AUDIENCE` | `vfs-clients` | Audience dei JWT consumati da VFS2. |
 | `VFS_PRIVATE_KEY_PATH` | nessuno | Percorso della chiave privata RS256 montata. |
@@ -505,7 +536,7 @@ Per abilitare il login con Google:
 6. Aggiungi tra gli `Authorized redirect URI`:
 
 ```text
-http://localhost:9000/auth/google/callback
+http://localhost:9000/auth/api/callback
 ```
 
 Se usi un dominio o una porta diversa, il valore deve coincidere esattamente con `GOOGLE_CALLBACK_URL`.

@@ -7,7 +7,9 @@
     "dev": "node --watch src/index.js",
     "dev:all": "concurrently -k \"npm:dev\" \"npm:ui:dev\"",
     "start": "node src/index.js",
-    "ui:build": "vite build",
+    "ui:build": "npm run ui:build:app && npm run ui:build:profile-widget",
+    "ui:build:app": "vite build",
+    "ui:build:profile-widget": "vite build --config vite.profile-widget.config.js",
     "ui:dev": "vite build --mode development --watch"
   },
   "dependencies": {
@@ -19,7 +21,6 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.1",
-    "google-auth-library": "10.9.1",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.9.5",

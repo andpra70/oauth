@@ -17,10 +17,6 @@ services:
     environment:
       MONGO_URI: ${MONGO_URI:-mongodb://root:rootpass@mongo:27017/oauth2?authSource=admin}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      VFS_GOOGLE_CLIENT_ID: ${VFS_GOOGLE_CLIENT_ID:-${GOOGLE_CLIENT_ID}}
-      VFS_GOOGLE_CLIENT_SECRET: ${VFS_GOOGLE_CLIENT_SECRET:-${GOOGLE_CLIENT_SECRET}}
-      VFS_GOOGLE_CALLBACK_URL: ${VFS_GOOGLE_CALLBACK_URL:-http://localhost:9000/auth/api/callback}
-      VFS_GOOGLE_CALLBACK_URLS: ${VFS_GOOGLE_CALLBACK_URLS:-http://localhost:9000/auth/api/callback}
       VFS_JWT_ISSUER: ${VFS_JWT_ISSUER:-vfs-auth}
       VFS_JWT_AUDIENCE: ${VFS_JWT_AUDIENCE:-vfs-clients}
       VFS_PRIVATE_KEY_PATH: /run/secrets/private.pem

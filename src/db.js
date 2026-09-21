@@ -46,6 +46,7 @@ function buildDefaultClientUrls() {
     const baseUrl = new URL(basePath ? `${basePath}/` : '/', `${origin}/`);
     redirectUris.push(new URL('app/callback', baseUrl).toString());
     redirectUris.push(new URL('authWidget/callback', baseUrl).toString());
+    redirectUris.push(new URL('/auth/api/callback', `${origin}/`).toString());
     postLogoutRedirectUris.push(new URL('app', baseUrl).toString());
     postLogoutRedirectUris.push(new URL('authWidget', baseUrl).toString());
   }
@@ -212,7 +213,18 @@ export function seedClientFromEnv() {
   };
 
   const existingIndex = state.oauth_clients.findIndex((item) => item.client_id === clientId);
-  if (existingIndex >= 0) return;
+  if (existingIndex >= 0) {
+    const existing = state.oauth_clients[existingIndex];
+    existing.redirect_uris = uniq([...(existing.redirect_uris || []), ...redirectUris]);
+    existing.post_logout_redirect_uris = uniq([...(existing.post_logout_redirect_uris || []), ...postLogoutRedirectUris]);
+    existing.grant_types = uniq([...(existing.grant_types || []), 'authorization_code', 'refresh_token']);
+    existing.response_types = uniq([...(existing.response_types || []), 'code']);
+    existing.scope = client.scope;
+    existing.token_endpoint_auth_method = authMethod;
+    existing.client_secret = client.client_secret;
+    saveState(state);
+    return;
+  }
   state.oauth_clients.push(client);
 
   saveState(state);
