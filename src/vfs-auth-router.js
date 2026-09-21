@@ -53,6 +53,8 @@ export async function createVfsAuthRouter() {
   const router = express.Router();
   const sha = (value) => crypto.createHash('sha256').update(value).digest('hex');
   const random = () => crypto.randomBytes(48).toString('base64url');
+  const stateKey = (state) => `auth:google:state:${state}`;
+  const ticketKey = (ticket) => `auth:exchange:ticket:${ticket}`;
   const maskIp = (ip) => String(ip || '').replace(/\d+$/, '0').slice(0, 80);
   const cookieOptions = { httpOnly: true, secure: cfg.cookieSecure, sameSite: 'none', path: '/auth/api', maxAge: cfg.refreshSeconds * 1000 };
   const callbackFor = (req) => {
@@ -64,7 +66,10 @@ export async function createVfsAuthRouter() {
     if (candidate.startsWith('/') && !candidate.startsWith('//')) return candidate;
     try {
       const parsed = new URL(candidate);
-      return cfg.origins.includes(parsed.origin) ? parsed.toString() : '/example/';
+      const isLocalDevelopment = parsed.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(parsed.hostname);
+      return (cfg.origins.includes(parsed.origin) || isLocalDevelopment) && !parsed.username && !parsed.password
+        ? parsed.toString()
+        : '/example/';
     } catch {
       return '/example/';
     }
@@ -117,21 +122,25 @@ export async function createVfsAuthRouter() {
   router.get('/healthz', (_req, res) => res.json({ status: 'ok', service: 'vfs-auth' }));
   router.get('/widget.js', (_req, res) => res.sendFile(path.join(publicDir, 'auth-widget.js')));
   router.use('/admin', express.static(path.join(publicDir, 'admin'), { index: 'index.html', maxAge: 0 }));
-  router.get('/api/login', (req, res) => {
+  router.get('/api/login', async (req, res, next) => { try {
     const resolvedCallback = callbackFor(req);
     const returnTo = safeReturnTo(req.query.return_to || '/example/');
-    const state = random();
-    res.cookie('oauth_state', state, { ...cookieOptions, path: '/auth/api/callback', maxAge: 600000 });
-    res.cookie('oauth_return_to', returnTo, { ...cookieOptions, path: '/auth/api/callback', maxAge: 600000 });
+    const state = `vfs.${random()}`;
+    await redis.set(stateKey(state), JSON.stringify({ flow: 'vfs', returnTo, callback: resolvedCallback }), { EX: 600 });
     const params = new URLSearchParams({ client_id: cfg.clientId, redirect_uri: resolvedCallback, response_type: 'code', scope: 'openid email profile', state, prompt: 'select_account' });
     res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
-  });
+  } catch (error) { next(error); } });
   router.get('/api/callback', async (req, res, next) => { try {
-    // The public callback is shared with the OIDC Google flow. A state that
-    // does not belong to the VFS cookie must be delegated to that handler.
-    if (!req.cookies.oauth_state || req.query.state !== req.cookies.oauth_state) return next();
+    const state = String(req.query.state || '');
+    // The callback is shared with the OIDC provider. Only VFS-prefixed states
+    // belong to this router; all other callbacks continue to the OIDC handler.
+    if (!state.startsWith('vfs.')) return next();
+    const pendingRaw = await redis.getDel(stateKey(state));
+    if (!pendingRaw) return res.status(400).send('Invalid or expired OAuth state');
+    const pendingLogin = JSON.parse(pendingRaw);
+    if (pendingLogin.flow !== 'vfs') return res.status(400).send('Invalid OAuth state');
     if (!req.query.code) return res.status(400).send('Invalid OAuth state');
-    const resolvedCallback = callbackFor(req);
+    const resolvedCallback = pendingLogin.callback;
     const body = new URLSearchParams({ code: String(req.query.code), client_id: cfg.clientId, client_secret: cfg.clientSecret, redirect_uri: resolvedCallback, grant_type: 'authorization_code' });
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
     if (!tokenResponse.ok) throw new Error('Google token exchange failed');
@@ -144,16 +153,44 @@ export async function createVfsAuthRouter() {
     const sid = crypto.randomUUID();
     const familyId = crypto.randomUUID();
     const session = await VfsSession.create({ userId: user._id, sid, familyId, expiresAt: new Date(Date.now() + cfg.refreshSeconds * 1000), lastSeenAt: new Date(), userAgent: String(req.get('user-agent') || '').slice(0, 200), ip: maskIp(req.ip) });
+    res.clearCookie('oauth_state', { path: '/auth/api/callback' });
+    res.clearCookie('oauth_return_to', { path: '/auth/api/callback' });
+    const returnTo = safeReturnTo(pendingLogin.returnTo || '/example/');
+    const destination = returnTo.startsWith('/') ? `${new URL(resolvedCallback).origin}${returnTo}` : returnTo;
+    const destinationUrl = new URL(destination);
+    const callbackOrigin = new URL(resolvedCallback).origin;
+    if (destinationUrl.origin !== callbackOrigin) {
+      const exchangeTicket = random();
+      await redis.set(ticketKey(exchangeTicket), JSON.stringify({ sid: session.sid, userId: String(user._id) }), { EX: 90 });
+      destinationUrl.searchParams.set('auth_ticket', exchangeTicket);
+      return res.redirect(destinationUrl.toString());
+    }
     const refresh = await createRefresh(user, session);
     res.cookie('vfs_refresh', refresh.raw, cookieOptions);
-    res.clearCookie('oauth_state', { path: '/auth/api/callback' });
-    const returnTo = safeReturnTo(req.cookies.oauth_return_to || '/example/');
-    res.clearCookie('oauth_return_to', { path: '/auth/api/callback' });
-    const destination = returnTo.startsWith('/') ? `${new URL(resolvedCallback).origin}${returnTo}` : returnTo;
-    return res.redirect(destination);
+    return res.redirect(destinationUrl.toString());
+  } catch (error) { return next(error); } });
+  router.post('/api/exchange', async (req, res, next) => { try {
+    const ticket = String(req.body.ticket || '');
+    if (!ticket) return res.status(400).json({ error: 'missing_ticket' });
+    const pendingRaw = await redis.getDel(ticketKey(ticket));
+    if (!pendingRaw) return res.status(401).json({ error: 'invalid_or_expired_ticket' });
+    const pendingExchange = JSON.parse(pendingRaw);
+    const session = await VfsSession.findOne({ sid: pendingExchange.sid, revokedAt: null });
+    const user = await VfsUser.findById(pendingExchange.userId);
+    if (!session || session.expiresAt < new Date() || !user || user.status !== 'active') {
+      return res.status(401).json({ error: 'session_expired' });
+    }
+    const refresh = await createRefresh(user, session);
+    const access = issueAccess(user, session);
+    session.currentJti = access.jti;
+    session.accessExpiresAt = access.expiresAt;
+    session.lastSeenAt = new Date();
+    await session.save();
+    return res.json({ accessToken: access.token, refreshToken: refresh.raw, expiresAt: access.expiresAt.toISOString(), user: { sub: user.googleSub, email: user.email, name: user.name, picture: user.picture, role: user.role }, issuer: cfg.issuer, audience: cfg.audience });
   } catch (error) { return next(error); } });
   router.post('/api/refresh', async (req, res, next) => { try {
-    const raw = req.cookies.vfs_refresh;
+    const bodyCredential = String(req.body.refreshToken || '');
+    const raw = bodyCredential || req.cookies.vfs_refresh;
     if (!raw) return res.status(401).json({ error: 'missing_refresh' });
     const refreshToken = await VfsRefreshToken.findOne({ tokenHash: sha(raw) });
     if (!refreshToken) { res.clearCookie('vfs_refresh', cookieOptions); return res.status(401).json({ error: 'invalid_refresh' }); }
@@ -171,8 +208,8 @@ export async function createVfsAuthRouter() {
     session.accessExpiresAt = access.expiresAt;
     session.lastSeenAt = new Date();
     await session.save();
-    res.cookie('vfs_refresh', replacement.raw, cookieOptions);
-    return res.json({ accessToken: access.token, expiresAt: access.expiresAt.toISOString(), user: { sub: user.googleSub, email: user.email, name: user.name, picture: user.picture, role: user.role }, issuer: cfg.issuer, audience: cfg.audience });
+    if (!bodyCredential) res.cookie('vfs_refresh', replacement.raw, cookieOptions);
+    return res.json({ accessToken: access.token, ...(bodyCredential ? { refreshToken: replacement.raw } : {}), expiresAt: access.expiresAt.toISOString(), user: { sub: user.googleSub, email: user.email, name: user.name, picture: user.picture, role: user.role }, issuer: cfg.issuer, audience: cfg.audience });
   } catch (error) { return next(error); } });
   router.post('/api/logout', bearer, async (req, res, next) => { try { await revokeSession(req.auth.session, 'logout'); res.clearCookie('vfs_refresh', cookieOptions).status(204).end(); } catch (error) { next(error); } });
   router.get('/api/session', bearer, (req, res) => res.json({ user: req.auth.user, sid: req.auth.session.sid }));

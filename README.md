@@ -41,6 +41,7 @@ VFS2. Il front controller pubblica questi endpoint sotto `/auth`:
 - `GET /auth/widget.js`: widget da includere nelle applicazioni;
 - `GET /auth/api/login`: avvia Google OAuth;
 - `GET /auth/api/callback`: callback Google da registrare nella console Google;
+- `POST /auth/api/exchange`: scambia il ticket monouso quando il client gira su un origin locale;
 - `POST /auth/api/refresh` e `POST /auth/api/logout`: gestione sessione;
 - `GET /auth/admin/`: console amministrativa VFS2.
 
@@ -48,6 +49,13 @@ Il prefisso `/auth` e applicato dal reverse proxy: direttamente sulla porta 9000
 gli stessi endpoint sono rispettivamente `/widget.js`, `/api/*` e `/admin/*`.
 Le applicazioni esistenti possono quindi continuare a caricare lo script relativo
 `/auth/widget.js` senza modifiche.
+
+Lo stato del login Google VFS viene conservato in Redis per 10 minuti ed è
+consumato atomicamente dalla callback. Quando `return_to` appartiene a un origin
+diverso dalla callback pubblica (per esempio `http://localhost:5173`), il server
+reindirizza il browser con un `auth_ticket` monouso valido 90 secondi. Il widget
+lo rimuove subito dall'URL, lo scambia automaticamente e gestisce il refresh
+locale senza dipendere da cookie condivisi tra `localhost` e il dominio pubblico.
 
 La chiave privata RS256 deve essere montata in runtime e deve corrispondere alla
 chiave pubblica configurata in VFS2. Il compose di esempio la monta da
