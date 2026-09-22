@@ -6,7 +6,9 @@ import { ProfileWidgetApp } from './ProfileWidgetApp.jsx';
 import { createOidcClient } from './oidc-client.js';
 
 const scriptUrl = document.currentScript?.src ? new URL(document.currentScript.src) : null;
-const inferredBase = scriptUrl ? `${scriptUrl.origin}${scriptUrl.pathname.replace(/\/profile-widget\.js$/, '')}` : window.location.origin;
+const inferredBase = scriptUrl
+  ? `${scriptUrl.origin}${scriptUrl.pathname.replace(/\/(?:profile-)?widget\.js$/, '')}`
+  : window.location.origin;
 const globalConfig = window.__PROFILE_WIDGET_CONFIG__ || {};
 const auth = createOidcClient({
   issuer: globalConfig.issuer || globalConfig.apiBase || inferredBase,
