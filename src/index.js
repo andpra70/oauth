@@ -326,6 +326,15 @@ function buildAbsoluteAppUrl(path) {
   return new URL(resolvePath(basePath, path), `${issuerUrl.origin}/`).toString();
 }
 
+function getInteractionOrigin(params) {
+  const origin = normalizeOrigin(params?.redirect_uri || '');
+  return origin && allowedOriginSet.has(origin) ? origin : issuerUrl.origin;
+}
+
+function buildInteractionAppUrl(params, path) {
+  return new URL(resolvePath(basePath, path), `${getInteractionOrigin(params)}/`).toString();
+}
+
 function getSafeCallbackUrl(rawValue) {
   const raw = String(rawValue || '').trim();
   if (!raw) return '';
@@ -695,7 +704,7 @@ async function finishApiInteraction(req, res, result, mergeWithLastSubmission = 
   const token = createInteractionCallbackSession(details.uid, result, mergeWithLastSubmission);
   return res.json({
     status: 'completed',
-    continueUrl: buildAbsoluteAppUrl(`/interaction/${encodeURIComponent(details.uid)}/continue?token=${encodeURIComponent(token)}`),
+    continueUrl: buildInteractionAppUrl(details.params, `/interaction/${encodeURIComponent(details.uid)}/continue?token=${encodeURIComponent(token)}`),
   });
 }
 
@@ -713,7 +722,7 @@ async function finishInteraction(req, res, result, {
 
   if (callbackUrl) {
     const token = createInteractionCallbackSession(details.uid, result, mergeWithLastSubmission);
-    const continueUrl = buildAbsoluteAppUrl(`/interaction/${encodeURIComponent(details.uid)}/continue?token=${encodeURIComponent(token)}`);
+    const continueUrl = buildInteractionAppUrl(details.params, `/interaction/${encodeURIComponent(details.uid)}/continue?token=${encodeURIComponent(token)}`);
     const redirectUrl = new URL(callbackUrl);
     if (callbackStage) redirectUrl.searchParams.set('stage', callbackStage);
     if (callbackStatus) redirectUrl.searchParams.set('status', callbackStatus);
@@ -2009,8 +2018,7 @@ web.get('/interaction/:uid/api', async (req, res) => {
       return res.status(400).json({ error: 'unsupported_interaction', message: `Unsupported interaction: ${prompt.name}` });
     }
     const client = params.client_id ? await provider.Client.find(params.client_id) : null;
-    const redirectOrigin = normalizeOrigin(params.redirect_uri || '');
-    const googleReturnOrigin = redirectOrigin && allowedOriginSet.has(redirectOrigin) ? redirectOrigin : issuerUrl.origin;
+    const googleReturnOrigin = getInteractionOrigin(params);
     const googleStartUrl = new URL(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/api/google/start`), `${issuerUrl.origin}/`);
     googleStartUrl.searchParams.set('return_origin', googleReturnOrigin);
     return res.json({
