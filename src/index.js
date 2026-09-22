@@ -422,11 +422,23 @@ function getGoogleRegisterUrl(uid) {
   return resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/register/google`);
 }
 
-function createGoogleState(uid, mode = 'login') {
+function getGoogleInteractionOrigin(req) {
+  const requestedOrigin = normalizeOrigin(req.query?.return_origin || '');
+  if (requestedOrigin && allowedOriginSet.has(requestedOrigin)) return requestedOrigin;
+  const candidates = [req.get('origin'), req.get('referer')];
+  for (const candidate of candidates) {
+    const origin = normalizeOrigin(candidate || '');
+    if (origin && allowedOriginSet.has(origin)) return origin;
+  }
+  return issuerUrl.origin;
+}
+
+function createGoogleState(uid, mode = 'login', interactionOrigin = issuerUrl.origin) {
   const state = randomUUID();
   googleLoginStates.set(state, {
     uid,
     mode,
+    interactionOrigin,
     expiresAt: Date.now() + 10 * 60 * 1000,
   });
   return state;
@@ -615,7 +627,7 @@ async function startGoogleAuth(req, res, next) {
     const mode = req.path.includes('/register/') || req.query.mode === 'register' ? 'register' : 'login';
     await provider.interactionDetails(req, res);
 
-    const state = createGoogleState(uid, mode);
+    const state = createGoogleState(uid, mode, getGoogleInteractionOrigin(req));
     const redirectUri = getGoogleCallbackUrl(req);
     const redirectUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     redirectUrl.searchParams.set('client_id', googleClientId);
@@ -1997,6 +2009,10 @@ web.get('/interaction/:uid/api', async (req, res) => {
       return res.status(400).json({ error: 'unsupported_interaction', message: `Unsupported interaction: ${prompt.name}` });
     }
     const client = params.client_id ? await provider.Client.find(params.client_id) : null;
+    const redirectOrigin = normalizeOrigin(params.redirect_uri || '');
+    const googleReturnOrigin = redirectOrigin && allowedOriginSet.has(redirectOrigin) ? redirectOrigin : issuerUrl.origin;
+    const googleStartUrl = new URL(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/api/google/start`), `${issuerUrl.origin}/`);
+    googleStartUrl.searchParams.set('return_origin', googleReturnOrigin);
     return res.json({
       uid,
       prompt: prompt.name,
@@ -2004,7 +2020,7 @@ web.get('/interaction/:uid/api', async (req, res) => {
       scope: String(params.scope || '').split(/\s+/).filter(Boolean),
       backUrl: getInteractionBackUrl(params),
       loginMethod: String(params.login_method || ''),
-      googleStartUrl: isGoogleOAuthEnabled() ? resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/api/google/start`) : '',
+      googleStartUrl: isGoogleOAuthEnabled() ? `${googleStartUrl.pathname}${googleStartUrl.search}` : '',
       features: { twoFactor: isTwoFactorEnabled(), google: isGoogleOAuthEnabled(), passkey: isPasskeyEnabled() },
     });
   } catch {
@@ -2839,6 +2855,13 @@ async function handleOidcGoogleCallback(req, res, next) {
   const error = String(req.query.error || '');
   const pending = consumeGoogleState(state);
   const uid = pending?.uid || '';
+  const interactionReturnUrl = (query = '') => {
+    const path = resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}${query}`);
+    const origin = pending?.interactionOrigin && allowedOriginSet.has(pending.interactionOrigin)
+      ? pending.interactionOrigin
+      : issuerUrl.origin;
+    return new URL(path, `${origin}/`).toString();
+  };
 
   try {
     if (!isGoogleOAuthEnabled()) {
@@ -2852,12 +2875,12 @@ async function handleOidcGoogleCallback(req, res, next) {
     }
 
     if (error) {
-      res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}?error=${encodeURIComponent('Google login was cancelled')}`));
+      res.redirect(interactionReturnUrl(`?error=${encodeURIComponent('Google login was cancelled')}`));
       return;
     }
 
     if (!code) {
-      res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}?error=${encodeURIComponent('Missing Google authorization code')}`));
+      res.redirect(interactionReturnUrl(`?error=${encodeURIComponent('Missing Google authorization code')}`));
       return;
     }
 
@@ -2865,7 +2888,7 @@ async function handleOidcGoogleCallback(req, res, next) {
     const profile = await fetchGoogleProfile(tokenSet.access_token);
     const user = upsertGoogleUser(profile);
     const callbackToken = createGoogleCallbackSession(uid, user.id, pending.mode || 'login');
-    res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}?google_token=${encodeURIComponent(callbackToken)}`));
+    res.redirect(interactionReturnUrl(`?google_token=${encodeURIComponent(callbackToken)}`));
   } catch (err) {
     console.error('Google callback failed', {
       uid,
@@ -2879,7 +2902,7 @@ async function handleOidcGoogleCallback(req, res, next) {
         return;
       }
 
-      res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}?error=${encodeURIComponent('Google login failed')}`));
+      res.redirect(interactionReturnUrl(`?error=${encodeURIComponent('Google login failed')}`));
       return;
     }
 
