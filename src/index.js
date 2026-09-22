@@ -1124,6 +1124,11 @@ web.get(['/setup/admin', '/setup/admin/'], (_req, res) => {
   res.type('html').send(renderTemplate(adminTemplate));
 });
 
+// Compatibility entry point used by the front controller's /auth alias.
+web.get(['/admin', '/admin/'], (_req, res) => {
+  res.type('html').send(renderTemplate(adminTemplate));
+});
+
 function redirectLegacyAdmin(page) {
   return (req, res) => {
     const query = new URLSearchParams({ page });
@@ -2889,6 +2894,7 @@ async function handleOidcGoogleCallback(req, res, next) {
 app.get('/auth/api/callback', handleOidcGoogleCallback);
 web.get(googleCallbackRoutePath, handleOidcGoogleCallback);
 app.get('/api/callback', handleOidcGoogleCallback);
+web.get(['/api/callback', '/google/callback'], handleOidcGoogleCallback);
 
 web.post('/interaction/:uid/2fa', formParser, loginLimiter, async (req, res, next) => {
   try {
