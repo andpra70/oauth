@@ -53,10 +53,12 @@ export function createOidcClient(input = {}) {
   let refreshInFlight = null;
   let initialization = null;
   let callbackInFlight = null;
+  let sessionReady = false;
 
   function getSession() {
+    if (!sessionReady) return null;
     const session = read();
-    if (!session.tokens?.access_token) return null;
+    if (!session.tokens?.access_token || Number(session.expiresAt || 0) <= Date.now()) return null;
     return {
       accessToken: session.tokens.access_token,
       refreshToken: session.tokens.refresh_token || '',
@@ -69,10 +71,11 @@ export function createOidcClient(input = {}) {
   }
 
   const getUser = () => getSession()?.user || null;
-  const isAuthenticated = () => Boolean(read().tokens?.access_token && Number(read().expiresAt || 0) > Date.now());
+  const isAuthenticated = () => Boolean(getSession());
 
   function clear(reason = 'logout') {
     sessionStorage.removeItem(storageKey);
+    sessionReady = true;
     window.dispatchEvent(new CustomEvent('oauth:logout', { detail: { reason } }));
   }
 
@@ -95,15 +98,20 @@ export function createOidcClient(input = {}) {
     return refreshInFlight;
   }
 
-  async function getAccessToken() {
+  async function usableAccessToken() {
     if (callbackInFlight) await callbackInFlight;
     const session = read();
     if (session.tokens?.access_token && Number(session.expiresAt || 0) > Date.now() + 30_000) return session.tokens.access_token;
     return refresh();
   }
 
+  async function getAccessToken() {
+    await initialize();
+    return usableAccessToken();
+  }
+
   async function loadUser({ emit = true } = {}) {
-    const accessToken = await getAccessToken();
+    const accessToken = await usableAccessToken();
     const response = await fetch(endpoint(config.issuer, 'me'), { headers: { authorization: `Bearer ${accessToken}` } });
     const user = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(user.error_description || user.error || 'UserInfo non disponibile');
@@ -137,12 +145,56 @@ export function createOidcClient(input = {}) {
   function initialize() {
     if (!initialization) initialization = (async () => {
       sessionStorage.removeItem(legacyStorageKey);
-      callbackInFlight ||= handleCallback();
-      await callbackInFlight;
-      if (!read().tokens?.access_token) return null;
-      return loadUser();
+      try {
+        callbackInFlight ||= handleCallback();
+        await callbackInFlight;
+        if (!read().tokens?.access_token) {
+          sessionReady = true;
+          return null;
+        }
+        try {
+          const user = await loadUser();
+          sessionReady = true;
+          return user;
+        } catch (error) {
+          if (!read().tokens?.refresh_token) throw error;
+          await refresh();
+          const user = await loadUser();
+          sessionReady = true;
+          return user;
+        }
+      } catch (error) {
+        clear('invalid_session');
+        window.dispatchEvent(new CustomEvent('oauth:session-expired', { detail: { message: error?.message || 'Session expired' } }));
+        return null;
+      }
     })();
     return initialization;
+  }
+
+  async function authenticatedFetch(url, options = {}) {
+    await initialize();
+    let token = await usableAccessToken();
+    const request = () => fetch(url, {
+      ...options,
+      headers: { ...(options.headers || {}), authorization: `Bearer ${token}` },
+    });
+    let response = await request();
+    if (response.status !== 401) return response;
+    try {
+      await refresh();
+      token = await usableAccessToken();
+      response = await request();
+      if (response.status === 401) {
+        clear('invalid_session');
+        window.dispatchEvent(new CustomEvent('oauth:session-expired'));
+      }
+      return response;
+    } catch (error) {
+      clear('invalid_session');
+      window.dispatchEvent(new CustomEvent('oauth:session-expired', { detail: { message: error?.message || 'Session expired' } }));
+      throw error;
+    }
   }
 
   async function login(method = '') {
@@ -176,5 +228,5 @@ export function createOidcClient(input = {}) {
     window.location.assign(url.toString());
   }
 
-  return { config, initialize, refresh, getAccessToken, getSession, getUser, isAuthenticated, loadUser, login, logout };
+  return { config, initialize, refresh, getAccessToken, authenticatedFetch, getSession, getUser, isAuthenticated, loadUser, login, logout };
 }

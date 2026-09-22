@@ -54,6 +54,7 @@ window.ProfileWidget = Object.freeze({
   logout: auth.logout,
   refresh: auth.refresh,
   getAccessToken: auth.getAccessToken,
+  authenticatedFetch: auth.authenticatedFetch,
   getSession: auth.getSession,
   getUser: auth.getUser,
   isAuthenticated: auth.isAuthenticated,
