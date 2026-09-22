@@ -96,6 +96,33 @@ export function ensureOidcStore() {
   cleanupExpired(store);
 }
 
+export function revokeOidcByAccountId(accountId) {
+  const target = String(accountId || '');
+  if (!target) return 0;
+  const store = loadStore();
+  const grantIds = new Set();
+  const sessionUids = new Set();
+  for (const bucket of Object.values(store.records)) {
+    for (const entry of Object.values(bucket)) {
+      if (String(entry?.payload?.accountId || '') === target) {
+        if (entry.payload.grantId) grantIds.add(entry.payload.grantId);
+        if (entry.payload.uid) sessionUids.add(entry.payload.uid);
+      }
+    }
+  }
+  let removed = 0;
+  for (const bucket of Object.values(store.records)) {
+    for (const [id, entry] of Object.entries(bucket)) {
+      const payload = entry?.payload || {};
+      if (String(payload.accountId || '') === target || grantIds.has(payload.grantId) || sessionUids.has(payload.uid)) {
+        delete bucket[id]; removed += 1;
+      }
+    }
+  }
+  saveStore(store);
+  return removed;
+}
+
 export class JsonAdapter {
   constructor(model) {
     this.model = model;

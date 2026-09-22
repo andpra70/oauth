@@ -33,33 +33,19 @@ Docker Compose) e non versionare valori reali in `.env.prod`.
 L'app carica le variabili da `.env` tramite `dotenv`. In locale usa tipicamente
 un `.env` copiato da `.env.example`; nel container riceve le variabili da Compose.
 
-## Compatibilita con le applicazioni VFS2
+## Integrazione applicazioni
 
-Lo stesso processo espone anche il servizio di autenticazione usato dalle app
-VFS2. Il front controller pubblica questi endpoint sotto `/auth`:
-
-- `GET /auth/widget.js`: widget da includere nelle applicazioni;
-- `GET /auth/profile-widget.js`: widget React condiviso per login e profilo;
-- `GET /auth/me` e `PUT /auth/me`: lettura e aggiornamento del profilo autenticato;
-- `GET /auth/api/login`: avvia Google OAuth;
-- `GET /auth/api/callback`: callback Google da registrare nella console Google;
-- `POST /auth/api/exchange`: scambia il ticket monouso quando il client gira su un origin locale;
-- `POST /auth/api/refresh` e `POST /auth/api/logout`: gestione sessione;
-- `GET /auth/admin/`: console amministrativa VFS2.
-
-Il prefisso `/auth` e applicato dal reverse proxy: direttamente sulla porta 9000
-gli stessi endpoint sono rispettivamente `/widget.js`, `/api/*` e `/admin/*`.
-Le applicazioni esistenti possono quindi continuare a caricare lo script relativo
-`/auth/widget.js` senza modifiche.
+Le applicazioni sono client OIDC standard e usano direttamente Authorization Code
+con PKCE, `/token`, `/me`, `/session/end` e gli endpoint di revoca/introspection.
+Non esiste un secondo issuer né un layer di token proprietario.
 
 ### Widget profilo condiviso
 
-Il widget usa automaticamente `VfsAuth`, caricandolo se necessario, e mantiene
-isolati markup e stili tramite Shadow DOM:
+Il widget è un client OIDC PKCE autonomo e mantiene isolati markup e stili tramite Shadow DOM:
 
 ```html
-<script src="/auth/profile-widget.js"></script>
-<profile-widget></profile-widget>
+<script src="/oauth-server/profile-widget.js"></script>
+<profile-widget issuer="https://example.com/oauth-server" client-id="fileserver-web"></profile-widget>
 ```
 
 In alternativa puo essere montato e controllato da JavaScript:
@@ -68,7 +54,7 @@ In alternativa puo essere montato e controllato da JavaScript:
 <script>
   window.__PROFILE_WIDGET_CONFIG__ = { autoMount: true };
 </script>
-<script src="/auth/profile-widget.js"></script>
+<script src="/oauth-server/profile-widget.js"></script>
 <script>
   ProfileWidget.open();
   // ProfileWidget.close();
@@ -76,35 +62,9 @@ In alternativa puo essere montato e controllato da JavaScript:
 </script>
 ```
 
-Su context personalizzati si possono impostare `apiBase` e `authWidgetUrl` nella
-configurazione globale oppure tramite gli attributi omonimi dell'elemento. Il
-widget non contiene hostname fissi. L'immagine proviene dal profilo Google;
-nome, cognome e nota sono salvati sul documento utente tramite `/auth/me`.
-
-Il login VFS usa Authorization Code + PKCE sul provider OIDC principale. Google,
-quando scelto nella schermata del provider, usa quindi le sole variabili
-`GOOGLE_CLIENT_ID` e `GOOGLE_CLIENT_SECRET`. Lo stato OIDC del bridge VFS viene
-conservato in Redis per 10 minuti ed è consumato atomicamente dalla callback.
-Quando `return_to` appartiene a un origin
-diverso dalla callback pubblica (per esempio `http://localhost:5173`), il server
-reindirizza il browser con un `auth_ticket` monouso valido 90 secondi. Il widget
-lo rimuove subito dall'URL, lo scambia automaticamente e gestisce il refresh
-locale senza dipendere da cookie condivisi tra `localhost` e il dominio pubblico.
-
-La chiave privata RS256 deve essere montata in runtime e deve corrispondere alla
-chiave pubblica configurata in VFS2. Il compose di esempio la monta da
-`./keys/private.pem`, file escluso da Git.
-
-Variabili principali del router compatibile:
-
-| Variabile | Default | Significato |
-| --- | --- | --- |
-| `VFS_AUTH_ENABLED` | `auto` | `auto` abilita le API VFS solo con configurazione completa; `true` rende obbligatorie tutte le variabili; `false` le disabilita. |
-| `MONGO_URI` | Mongo locale del compose | Database utenti, sessioni, refresh token e audit. |
-| `REDIS_URL` | Redis locale del compose | Revoche e stato sessione condiviso. |
-| `VFS_JWT_ISSUER` | `vfs-auth` | Issuer dei JWT consumati da VFS2. |
-| `VFS_JWT_AUDIENCE` | `vfs-clients` | Audience dei JWT consumati da VFS2. |
-| `VFS_PRIVATE_KEY_PATH` | nessuno | Percorso della chiave privata RS256 montata. |
+Su context personalizzati si impostano `issuer` e `clientId` nella configurazione
+globale, oppure gli attributi `issuer` e `client-id`. Nome, cognome e nota sono
+salvati nel modello utente OIDC tramite `PATCH /me`.
 
 ### Variabili applicative (runtime server)
 
@@ -150,7 +110,7 @@ Note operative:
 | --- | --- | --- |
 | `GOOGLE_CLIENT_ID` | vuoto | OAuth Client ID Google. |
 | `GOOGLE_CLIENT_SECRET` | vuoto | OAuth Client Secret Google. |
-| `GOOGLE_CALLBACK_PATH` | `/auth/api/callback` | Path pubblico condiviso della callback Google. |
+| `GOOGLE_CALLBACK_PATH` | `{BASE_PATH}/auth/google/callback` | Path pubblico della callback Google. |
 | `GOOGLE_CALLBACK_URL` | derivata da `ISSUER` + `GOOGLE_CALLBACK_PATH` | URL assoluta callback da registrare lato Google Console. |
 
 ### Passkey/WebAuthn (opzionale)
@@ -181,31 +141,9 @@ UI integrata nello stesso container:
 http://localhost:9000/app
 ```
 
-AuthWidget React:
-
-```text
-http://localhost:9000/authWidget
-```
-
-Configurazione runtime AuthWidget (cross-origin/embeddable):
-
-- via `window.__AUTH_WIDGET_CONFIG__` prima di caricare `app/assets/authWidget.js`
-- oppure via query string su `/authWidget`:
-  - `awIssuer`
-  - `awClientId`
-  - `awRedirectUri`
-  - `awOrigin` (base per risolvere URI relative)
-  - `awPostLogoutRedirectUri`
-  - `awScope`
-  - CTA flags: `awShowLogin`, `awShowLogout`, `awShowExpand`, `awShowEditProfile`
-
-Esempio:
-
-```text
-http://localhost:9000/authWidget?awIssuer=http://localhost:9000&awClientId=fileserver-web&awOrigin=http://localhost:8080&awRedirectUri=/oauth/callback&awPostLogoutRedirectUri=/logged-out
-```
-
-Con `awShowExpand` il widget si espande/collassa cliccando la picture/avatar, mostra i campi profilo e abilita `Edit profile` (se non disabilitato). Il salvataggio usa `PATCH /me` con whitelist dei campi aggiornabili (`preferred_username`, `email`, `picture`).
+Il Profile Widget è l'unico SDK/UI di autenticazione condiviso. Espone sia
+`window.ProfileWidget` sia l'alias compatibile `window.VfsAuth`; il salvataggio
+del profilo usa `PATCH /me`.
 
 ## Integrazione Login Da Altre App Nello Stesso Stack Compose
 
@@ -310,15 +248,35 @@ Endpoint applicativi:
 - `GET /`
 - `GET /app`
 - `GET /app/callback`
-- `GET /authWidget`
-- `GET /authWidget/callback`
+- `GET /profile-widget.js`
+- `GET /widget.js` (alias legacy dello stesso bundle)
 - `GET /health`
+- `GET /setup/admin?token=SETUP_TOKEN` (SPA amministrativa)
+- `GET /reset-password?token=...` (conferma password frontend)
+- `POST /password-reset/request`
+- `POST /password-reset/validate`
+- `POST /password-reset/confirm`
 - `GET /setup/2fa-qr/:username`
 - `GET /setup/2fa-qr/:username.json`
 - `GET /setup/runtime-config`
 - `POST /setup/runtime-config`
 - `POST /setup/passkeys/:username/options`
 - `POST /setup/passkeys/:username/verify`
+
+La SPA amministrativa usa esclusivamente API JSON sotto `/setup/api/*` per
+utenti, client OIDC, sessioni, grant e configurazione runtime. Il setup token
+viene trasferito in `sessionStorage`, rimosso dall'URL e inviato nell'header
+`X-Setup-Token`. Sul front controller è disponibile anche come `/auth/admin`.
+
+## Reset password via email
+
+Con `MAIL_ENABLED=true` gli account locali possono richiedere il reset dalla
+modale del Profile Widget. Il server salva esclusivamente l'hash SHA-256 del
+token monouso, con TTL configurabile, e revoca le sessioni OIDC dopo il cambio
+password. Il Compose locale include Mailpit: SMTP sulla porta `1025` e inbox
+web su `http://localhost:8025`. In produzione configura `SMTP_HOST`,
+`SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM` e
+`PASSWORD_RESET_PUBLIC_URL` per il provider SMTP reale.
 
 Endpoint OIDC/OAuth2:
 
@@ -331,20 +289,21 @@ Endpoint OIDC/OAuth2:
 - `POST /token/revocation`
 - `GET /session/end`
 
-Endpoint interni di interaction usati dal login browser-based:
+Auth UI frontend e API di interaction:
 
-- `GET /interaction/:uid`
-- `GET /interaction/:uid/register`
-- `POST /interaction/:uid/register`
-- `POST /interaction/:uid/login`
-- `GET /interaction/:uid/login/google`
-- `GET /interaction/:uid/register/google`
+- `GET /interaction/:uid` (shell React, nessuna logica di login server-rendered)
+- `GET /interaction/:uid/api`
+- `POST /interaction/:uid/api/login`
+- `POST /interaction/:uid/api/register`
+- `POST /interaction/:uid/api/consent`
+- `GET /interaction/:uid/api/google/start`
+- `POST /interaction/:uid/api/google/complete`
+- `POST /interaction/:uid/api/passkey/complete`
+- `GET /interaction/:uid/continue` (continuazione OIDC monouso, senza UX)
 - `POST /interaction/:uid/passkey/onboarding/options`
 - `POST /interaction/:uid/passkey/onboarding/verify`
-- `GET /interaction/:uid/passkey/onboarding/continue`
 - `POST /interaction/:uid/passkey/options`
 - `POST /interaction/:uid/passkey/verify`
-- `GET /interaction/:uid/passkey/continue`
 - `POST /interaction/:uid/2fa`
 - `POST /interaction/:uid/confirm`
 - `POST /interaction/:uid/abort`
@@ -536,7 +495,7 @@ Per abilitare il login con Google:
 6. Aggiungi tra gli `Authorized redirect URI`:
 
 ```text
-http://localhost:9000/auth/api/callback
+http://localhost:9000/auth/google/callback
 ```
 
 Se usi un dominio o una porta diversa, il valore deve coincidere esattamente con `GOOGLE_CALLBACK_URL`.
@@ -548,14 +507,15 @@ Configura queste variabili:
 ```bash
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
-GOOGLE_CALLBACK_PATH=/auth/api/callback
-GOOGLE_CALLBACK_URL=http://localhost:9000/auth/api/callback
+GOOGLE_CALLBACK_PATH=/auth/google/callback
+GOOGLE_CALLBACK_URL=http://localhost:9000/auth/google/callback
 ```
 
 Note operative:
 
 - `GOOGLE_CALLBACK_PATH` è il path servito da Express.
 - `GOOGLE_CALLBACK_URL` è l'URL assoluto inviato a Google e deve essere registrato nella console Google.
+- `/auth/api/callback` resta disponibile temporaneamente come alias per le configurazioni Google precedenti.
 - Il login Google viene mostrato nella pagina `/interaction/:uid` solo se `GOOGLE_CLIENT_ID` e `GOOGLE_CLIENT_SECRET` sono valorizzati.
 
 Avvio locale:
@@ -645,5 +605,5 @@ Nota: WebAuthn richiede origin sicuro (`https`) oppure `localhost` in sviluppo.
 - In Docker di default viene usato un volume nominato (`oauth-server-data`) montato in `/app/data/oauth`
 - Le variabili runtime sono caricate da `.env` (nel build Docker viene generato da `.env.prod`)
 - Il client seedato di default usa `client_id=fileserver-web`
-- I redirect URI seedati di default includono `http://localhost:9000/app/callback` e `http://localhost:9000/authWidget/callback`
+- I redirect URI seedati di default includono `http://localhost:9000/app/callback`; le callback delle SPA vengono registrate secondo gli origin consentiti.
 - Se `DEFAULT_CLIENT_AUTH_METHOD=none`, lo scambio code -> token usa PKCE senza `client_secret`

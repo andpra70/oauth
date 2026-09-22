@@ -23,7 +23,10 @@ export function ProfileModal({ profile, saving, error, onClose, onSave, onLogout
             {profile.picture ? <img src={profile.picture} alt="" referrerPolicy="no-referrer" /> : <span>U</span>}
             <div><strong id="profile-title">Profilo</strong><small>{profile.email}</small></div>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Chiudi">×</button>
+          <div className="header-actions">
+            <button className="logout top-logout" type="button" onClick={onLogout} disabled={saving}>Logout</button>
+            <button className="icon-button" type="button" onClick={onClose} aria-label="Chiudi">×</button>
+          </div>
         </header>
         <nav aria-label="Sezioni profilo">
           <button type="button" className={tab === 'profile' ? 'active' : ''} onClick={() => setTab('profile')}>Informazioni</button>
@@ -33,15 +36,11 @@ export function ProfileModal({ profile, saving, error, onClose, onSave, onLogout
           {tab === 'profile' ? <div className="fields">
             <label>Nome<input value={form.firstName} maxLength="100" onChange={change('firstName')} /></label>
             <label>Cognome<input value={form.lastName} maxLength="100" onChange={change('lastName')} /></label>
-            <label>Immagine Google<div className="picture-row">
-              {profile.picture ? <img src={profile.picture} alt="Immagine profilo Google" referrerPolicy="no-referrer" /> : <span>Nessuna immagine</span>}
-            </div></label>
           </div> : <div className="fields">
             <label>Nota<textarea value={form.note} maxLength="2000" rows="7" onChange={change('note')} placeholder="Informazioni aggiuntive sul profilo" /></label>
           </div>}
           {error && <p className="error" role="alert">{error}</p>}
-          <footer>
-            <button className="logout" type="button" onClick={onLogout}>Logout</button>
+          <footer className="profile-footer">
             <div><button type="button" onClick={onClose}>Annulla</button><button className="primary" type="submit" disabled={saving}>{saving ? 'Salvataggio…' : 'Salva'}</button></div>
           </footer>
         </form>

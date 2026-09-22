@@ -19,7 +19,9 @@ export default defineConfig({
     rollupOptions: {
       input: {
         app: resolve(__dirname, 'frontend/app/main.jsx'),
-        authWidget: resolve(__dirname, 'frontend/authWidget/main.jsx'),
+        'auth-ui': resolve(__dirname, 'frontend/authUi/main.jsx'),
+        admin: resolve(__dirname, 'frontend/admin/main.jsx'),
+        'reset-password': resolve(__dirname, 'frontend/passwordReset/main.jsx'),
         'oidc-ui': resolve(__dirname, 'frontend/oidc-ui/main.jsx'),
       },
       output: {

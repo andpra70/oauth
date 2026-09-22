@@ -1,6 +1,5 @@
 function normalizeBase(value) {
-  const base = String(value || '/auth').replace(/\/+$/, '');
-  return base || '/auth';
+  return String(value || window.location.origin).replace(/\/+$/, '');
 }
 
 async function responseJson(response) {
@@ -24,6 +23,19 @@ export function createProfileApi(baseUrl, getAccessToken) {
   };
   return {
     get: () => request(),
-    update: (profile) => request({ method: 'PUT', body: JSON.stringify(profile) }),
+    update: (profile) => request({ method: 'PATCH', body: JSON.stringify(profile) }),
   };
+}
+
+export async function getAuthFeatures(baseUrl) {
+  return responseJson(await fetch(`${normalizeBase(baseUrl)}/config`, {
+    credentials: 'include',
+    cache: 'no-store',
+  }));
+}
+
+export async function requestPasswordReset(baseUrl, email) {
+  return responseJson(await fetch(`${normalizeBase(baseUrl)}/password-reset/request`, {
+    method: 'POST', credentials: 'include', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }),
+  }));
 }

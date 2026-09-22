@@ -45,10 +45,7 @@ function buildDefaultClientUrls() {
   for (const origin of origins) {
     const baseUrl = new URL(basePath ? `${basePath}/` : '/', `${origin}/`);
     redirectUris.push(new URL('app/callback', baseUrl).toString());
-    redirectUris.push(new URL('authWidget/callback', baseUrl).toString());
-    redirectUris.push(new URL('/auth/api/callback', `${origin}/`).toString());
     postLogoutRedirectUris.push(new URL('app', baseUrl).toString());
-    postLogoutRedirectUris.push(new URL('authWidget', baseUrl).toString());
   }
 
   return {
@@ -61,6 +58,7 @@ function defaultState() {
   return {
     users: [],
     oauth_clients: [],
+    password_reset_tokens: [],
   };
 }
 
@@ -80,9 +78,15 @@ function loadState() {
       ? parsed.users.map((user) => ({
           ...user,
           passkeys: Array.isArray(user?.passkeys) ? user.passkeys : [],
+          first_name: String(user?.first_name || ''),
+          last_name: String(user?.last_name || ''),
+          note: String(user?.note || ''),
+          role: user?.role === 'admin' || user?.username === (process.env.ADMIN_USERNAME || 'admin') ? 'admin' : 'user',
+          status: user?.status === 'disabled' ? 'disabled' : 'active',
         }))
       : [],
     oauth_clients: Array.isArray(parsed.oauth_clients) ? parsed.oauth_clients : [],
+    password_reset_tokens: Array.isArray(parsed.password_reset_tokens) ? parsed.password_reset_tokens : [],
   };
 }
 
@@ -169,6 +173,11 @@ export async function seedAdminFromEnv() {
     password_hash: passwordHash,
     totp_secret: secret.base32,
     totp_enabled: 1,
+    role: 'admin',
+    status: 'active',
+    first_name: '',
+    last_name: '',
+    note: '',
     created_at: nowIso(),
   });
   saveState(state);
@@ -215,8 +224,10 @@ export function seedClientFromEnv() {
   const existingIndex = state.oauth_clients.findIndex((item) => item.client_id === clientId);
   if (existingIndex >= 0) {
     const existing = state.oauth_clients[existingIndex];
-    existing.redirect_uris = uniq([...(existing.redirect_uris || []), ...redirectUris]);
-    existing.post_logout_redirect_uris = uniq([...(existing.post_logout_redirect_uris || []), ...postLogoutRedirectUris]);
+    existing.redirect_uris = uniq([...(existing.redirect_uris || []), ...redirectUris])
+      .filter((uri) => !String(uri).includes('/authWidget/callback'));
+    existing.post_logout_redirect_uris = uniq([...(existing.post_logout_redirect_uris || []), ...postLogoutRedirectUris])
+      .filter((uri) => !String(uri).includes('/authWidget'));
     existing.grant_types = uniq([...(existing.grant_types || []), 'authorization_code', 'refresh_token']);
     existing.response_types = uniq([...(existing.response_types || []), 'code']);
     existing.scope = client.scope;
@@ -603,6 +614,44 @@ export function findUserById(id) {
   return state.users.find((user) => user.id === id);
 }
 
+export function findUserByEmail(email) {
+  const target = normalizeEmail(email);
+  if (!target) return null;
+  const state = loadState();
+  return state.users.find((user) => normalizeEmail(user.email) === target) || null;
+}
+
+export function createPasswordResetToken(userId, tokenHash, expiresAt) {
+  const state = loadState();
+  const now = Date.now();
+  state.password_reset_tokens = state.password_reset_tokens.filter((item) => item.user_id !== userId && !item.used_at && Date.parse(item.expires_at) > now);
+  const record = { id: newId('pwd'), user_id: userId, token_hash: tokenHash, created_at: nowIso(), expires_at: new Date(expiresAt).toISOString(), used_at: null };
+  state.password_reset_tokens.push(record);
+  saveState(state);
+  return { ...record };
+}
+
+export function findValidPasswordResetToken(tokenHash) {
+  const state = loadState();
+  const record = state.password_reset_tokens.find((item) => item.token_hash === tokenHash && !item.used_at && Date.parse(item.expires_at) > Date.now());
+  return record ? { ...record } : null;
+}
+
+export async function consumePasswordResetToken(tokenHash, password) {
+  if (String(password || '').length < 12) throw new Error('Password must be at least 12 chars long');
+  const state = loadState();
+  const record = state.password_reset_tokens.find((item) => item.token_hash === tokenHash && !item.used_at && Date.parse(item.expires_at) > Date.now());
+  if (!record) throw new Error('Invalid or expired reset token');
+  const userIndex = state.users.findIndex((user) => user.id === record.user_id);
+  if (userIndex < 0 || state.users[userIndex].status === 'disabled') throw new Error('Invalid or expired reset token');
+  state.users[userIndex].password_hash = await hashPassword(password);
+  state.users[userIndex].updated_at = nowIso();
+  const usedAt = nowIso();
+  for (const item of state.password_reset_tokens) if (item.user_id === record.user_id) item.used_at = usedAt;
+  saveState(state);
+  return { id: state.users[userIndex].id, email: state.users[userIndex].email, username: state.users[userIndex].username };
+}
+
 export function findUserByPasskeyCredentialId(credentialId) {
   const target = String(credentialId || '');
   if (!target) return null;
@@ -645,6 +694,11 @@ function buildUserPayload(state, input, existing = null) {
   const picture = String(input.picture || '').trim() || null;
   const googleSubject = String(input.google_subject || '').trim() || null;
   const totpEnabled = String(input.totp_enabled || existing?.totp_enabled || '0') === '1' ? 1 : 0;
+  const firstName = String(input.first_name ?? existing?.first_name ?? '').trim().slice(0, 100);
+  const lastName = String(input.last_name ?? existing?.last_name ?? '').trim().slice(0, 100);
+  const note = String(input.note ?? existing?.note ?? '').trim().slice(0, 2000);
+  const role = String(input.role || existing?.role || 'user') === 'admin' ? 'admin' : 'user';
+  const status = String(input.status || existing?.status || 'active') === 'disabled' ? 'disabled' : 'active';
 
   if (!username) {
     throw new Error('Username is required');
@@ -669,6 +723,11 @@ function buildUserPayload(state, input, existing = null) {
     picture,
     google_subject: googleSubject,
     totp_enabled: totpEnabled,
+    first_name: firstName,
+    last_name: lastName,
+    note,
+    role,
+    status,
   };
 }
 
@@ -741,7 +800,7 @@ export function updateUserProfile(id, input) {
   }
 
   const payload = (input && typeof input === 'object') ? input : {};
-  const allowedKeys = new Set(['preferred_username', 'email', 'picture']);
+  const allowedKeys = new Set(['preferred_username', 'email', 'picture', 'firstName', 'lastName', 'given_name', 'family_name', 'note']);
   const providedKeys = Object.keys(payload);
   const forbiddenKey = providedKeys.find((key) => !allowedKeys.has(key));
   if (forbiddenKey) {
@@ -758,6 +817,9 @@ export function updateUserProfile(id, input) {
   const nextPicture = Object.hasOwn(payload, 'picture')
     ? (String(payload.picture || '').trim() || null)
     : (existing.picture || null);
+  const nextFirstName = String(payload.firstName ?? payload.given_name ?? existing.first_name ?? '').trim().slice(0, 100);
+  const nextLastName = String(payload.lastName ?? payload.family_name ?? existing.last_name ?? '').trim().slice(0, 100);
+  const nextNote = String(payload.note ?? existing.note ?? '').trim().slice(0, 2000);
 
   if (!nextUsername) {
     throw new Error('preferred_username is required');
@@ -780,6 +842,9 @@ export function updateUserProfile(id, input) {
     username: nextUsername,
     email: nextEmail,
     picture: nextPicture,
+    first_name: nextFirstName,
+    last_name: nextLastName,
+    note: nextNote,
     updated_at: nowIso(),
   };
 
@@ -831,6 +896,8 @@ export function upsertGoogleUser(profile) {
       existing.totp_secret = secret.base32;
     }
     existing.totp_enabled = 1;
+    existing.role = existing.role === 'admin' ? 'admin' : 'user';
+    existing.status = existing.status === 'disabled' ? 'disabled' : 'active';
     existing.updated_at = timestamp;
     if (!Array.isArray(existing.passkeys)) {
       existing.passkeys = [];
@@ -850,6 +917,11 @@ export function upsertGoogleUser(profile) {
     totp_secret: secret.base32,
     totp_enabled: 1,
     passkeys: [],
+    first_name: '',
+    last_name: '',
+    note: '',
+    role: 'user',
+    status: 'active',
     created_at: timestamp,
     updated_at: timestamp,
   };

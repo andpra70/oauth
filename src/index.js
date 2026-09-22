@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { mkdirSync, readFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import express from 'express';
@@ -11,11 +11,12 @@ import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import { Provider, errors } from 'oidc-provider';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
-import { clearUserPasskeys, createClient, createUser, deleteClient, deleteUser, ensureClientPostLogoutRedirectUri, ensureClientRedirectUri, ensureSchema, findPasskeyByCredentialId, findUserById, findUserByUsername, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, touchUserPasskeyCounter, updateClient, updateClientRedirectUris, updateUser, updateUserProfile, upsertGoogleUser, upsertUserPasskey } from './db.js';
+import { clearUserPasskeys, consumePasswordResetToken, createClient, createPasswordResetToken, createUser, deleteClient, deleteUser, ensureClientPostLogoutRedirectUri, ensureClientRedirectUri, ensureSchema, findPasskeyByCredentialId, findUserByEmail, findUserById, findUserByUsername, findValidPasswordResetToken, getClients, listUsers, seedAdminFromEnv, seedClientFromEnv, touchUserPasskeyCounter, updateClient, updateClientRedirectUris, updateUser, updateUserProfile, upsertGoogleUser, upsertUserPasskey } from './db.js';
 import { findAccount } from './account.js';
 import { renderConsent, renderExpiredSession, renderLogin, renderLogout, renderLogoutAutoSubmit, renderLogoutSuccess, renderOidcSessionsAdmin, renderPasskeyOnboarding, renderProviderError, renderRedirectConfigAdmin, renderRegister, renderTotpQrSetup, renderUsersAdmin } from './html.js';
-import { cleanupExpiredOidcRecords, ensureOidcStore, JsonAdapter, listOidcStoreOverview, removeOidcRecord, revokeClientCredentialsToken, revokeOidcByGrantId, revokeOidcBySessionUid } from './oidc-adapter.js';
-import { createVfsAuthRouter, missingVfsAuthConfig } from './vfs-auth-router.js';
+import { cleanupExpiredOidcRecords, ensureOidcStore, JsonAdapter, listOidcStoreOverview, removeOidcRecord, revokeClientCredentialsToken, revokeOidcByAccountId, revokeOidcByGrantId, revokeOidcBySessionUid } from './oidc-adapter.js';
+import { getMailConfig } from './mail/mail-model.js';
+import { isMailEnabled, sendPasswordResetMail } from './mail/mail-service.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(__dirname, '..', 'public');
@@ -38,8 +39,10 @@ const runtimeConfig = {
   confirmLogout: String(process.env.CONFIRM_LOGOUT || 'true').toLowerCase() !== 'false',
 };
 const indexTemplate = readFileSync(join(publicDir, 'index.html'), 'utf8');
-const authWidgetTemplate = readFileSync(join(publicDir, 'authWidget.html'), 'utf8');
 const flowDiagramTemplate = readFileSync(join(publicDir, 'flowDiagram.html'), 'utf8');
+const authUiTemplate = readFileSync(join(publicDir, 'auth-ui.html'), 'utf8');
+const adminTemplate = readFileSync(join(publicDir, 'admin.html'), 'utf8');
+const resetPasswordTemplate = readFileSync(join(publicDir, 'reset-password.html'), 'utf8');
 
 function normalizeBasePath(value) {
   const raw = String(value || '').trim();
@@ -218,6 +221,13 @@ const loginLimiter = rateLimit({
     xForwardedForHeader: false,
   },
 });
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { trustProxy: false, xForwardedForHeader: false },
+});
 
 const totpChallenges = new Map();
 const totpSetupSessions = new Map();
@@ -231,7 +241,7 @@ const passkeyOnboardingSessions = new Map();
 
 const googleClientId = process.env.GOOGLE_CLIENT_ID || '';
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
-const googleCallbackPublicPath = process.env.GOOGLE_CALLBACK_PATH || '/auth/api/callback';
+const googleCallbackPublicPath = process.env.GOOGLE_CALLBACK_PATH || resolvePath(basePath, '/auth/google/callback');
 const googleCallbackPath = googleCallbackPublicPath;
 const googleCallbackRoutePath = '/auth/google/callback';
 const configuredGoogleCallbackUrl = process.env.GOOGLE_CALLBACK_URL || '';
@@ -602,7 +612,7 @@ async function startGoogleAuth(req, res, next) {
     }
 
     const { uid } = req.params;
-    const mode = 'register';
+    const mode = req.path.includes('/register/') || req.query.mode === 'register' ? 'register' : 'login';
     await provider.interactionDetails(req, res);
 
     const state = createGoogleState(uid, mode);
@@ -666,6 +676,19 @@ async function finishLogin(req, res, accountId) {
     callbackStage: 'session_ready',
     callbackStatus: 'success',
   });
+}
+
+async function finishApiInteraction(req, res, result, mergeWithLastSubmission = false) {
+  const details = await provider.interactionDetails(req, res);
+  const token = createInteractionCallbackSession(details.uid, result, mergeWithLastSubmission);
+  return res.json({
+    status: 'completed',
+    continueUrl: buildAbsoluteAppUrl(`/interaction/${encodeURIComponent(details.uid)}/continue?token=${encodeURIComponent(token)}`),
+  });
+}
+
+async function finishApiLogin(req, res, accountId) {
+  return finishApiInteraction(req, res, { login: { accountId, remember: false } }, false);
 }
 
 async function finishInteraction(req, res, result, {
@@ -777,7 +800,7 @@ const provider = new Provider(issuer, {
   scopes: ['openid', 'profile', 'email', 'offline_access'],
   claims: {
     openid: ['sub'],
-    profile: ['preferred_username', 'picture'],
+    profile: ['preferred_username', 'name', 'given_name', 'family_name', 'picture', 'note', 'roles'],
     email: ['email'],
   },
   features: {
@@ -838,7 +861,7 @@ const provider = new Provider(issuer, {
   },
   interactions: {
     url(_ctx, interaction) {
-      return resolvePath(basePath, `/interaction/${interaction.uid}`);
+      return resolvePath(basePath, `/interaction/${encodeURIComponent(interaction.uid)}`);
     },
   },
   renderError(ctx, out, defaultError) {
@@ -854,6 +877,12 @@ const provider = new Provider(issuer, {
     ctx.body = renderProviderError(payload);
   },
   extraParams: {
+    login_method(_ctx, value) {
+      if (value === undefined) return;
+      if (!['account', 'passkey', 'google'].includes(String(value))) {
+        throw new errors.InvalidRequest('"login_method" is invalid');
+      }
+    },
     callbackUrl(_ctx, value) {
       if (value === undefined) return;
       if (!getSafeCallbackUrl(value)) {
@@ -946,23 +975,94 @@ app.use(helmet({
 
 const formParser = express.urlencoded({ extended: false });
 const jsonParser = express.json({ limit: '1mb' });
-const vfsAuthMode = String(process.env.VFS_AUTH_ENABLED || 'auto').trim().toLowerCase();
-const missingVfsConfig = missingVfsAuthConfig();
-if (vfsAuthMode === 'true' && missingVfsConfig.length > 0) {
-  throw new Error(`VFS auth enabled but configuration is missing: ${missingVfsConfig.join(', ')}`);
-}
-if (vfsAuthMode !== 'false' && missingVfsConfig.length === 0) {
-  app.use(await createVfsAuthRouter());
-} else if (vfsAuthMode !== 'false') {
-  console.warn(`[vfs-auth] disabled: missing ${missingVfsConfig.join(', ')}`);
-}
 const web = express.Router();
 
 web.get('/health', (_req, res) => {
   res.json({ ok: true, issuer });
 });
 
+web.get('/config', (req, res) => {
+  const origin = normalizeOrigin(req.get('origin') || '');
+  if (origin && isCorsOriginAllowed(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    passkeyEnabled: isPasskeyEnabled(),
+    googleEnabled: isGoogleOAuthEnabled(),
+    passwordResetEnabled: isMailEnabled(),
+  });
+});
+
+web.use('/password-reset', (req, res, next) => {
+  const origin = normalizeOrigin(req.get('origin') || '');
+  if (origin && isCorsOriginAllowed(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+web.get(['/reset-password', '/reset-password/'], (_req, res) => {
+  res.type('html').send(renderTemplate(resetPasswordTemplate));
+});
+
+function passwordResetHash(token) {
+  return createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+web.post('/password-reset/request', jsonParser, passwordResetLimiter, async (req, res) => {
+  const generic = { ok: true, message: 'Se l’account esiste, riceverai un messaggio.' };
+  const startedAt = Date.now();
+  try {
+    if (isMailEnabled()) {
+      const user = findUserByEmail(req.body?.email);
+      if (user && user.status !== 'disabled' && user.auth_provider !== 'google' && user.email) {
+        const token = randomBytes(32).toString('base64url');
+        const config = getMailConfig();
+        createPasswordResetToken(user.id, passwordResetHash(token), Date.now() + config.tokenTtlSeconds * 1000);
+        const resetBase = config.resetPublicUrl || buildAbsoluteAppUrl('/reset-password');
+        const resetUrl = new URL(resetBase);
+        resetUrl.searchParams.set('token', token);
+        await sendPasswordResetMail({ email: user.email, username: user.username, resetUrl: resetUrl.toString() });
+      }
+    }
+  } catch (error) {
+    console.error('Password reset email delivery failed', { message: error?.message });
+  }
+  const remaining = Math.max(0, 300 - (Date.now() - startedAt));
+  if (remaining) await new Promise((resolve) => setTimeout(resolve, remaining));
+  return res.json(generic);
+});
+
+web.post('/password-reset/validate', jsonParser, passwordResetLimiter, (req, res) => {
+  const valid = Boolean(findValidPasswordResetToken(passwordResetHash(req.body?.token)));
+  return valid ? res.json({ valid: true }) : res.status(400).json({ error: 'Invalid or expired reset token' });
+});
+
+web.post('/password-reset/confirm', jsonParser, passwordResetLimiter, async (req, res) => {
+  const token = String(req.body?.token || '');
+  const password = String(req.body?.password || '');
+  if (!token || password !== String(req.body?.passwordConfirmation || '')) return res.status(400).json({ error: 'Password confirmation does not match' });
+  try {
+    const user = await consumePasswordResetToken(passwordResetHash(token), password);
+    revokeOidcByAccountId(user.id);
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(400).json({ error: error?.message || 'Unable to reset password' });
+  }
+});
+
 web.get('/profile-widget.js', (_req, res) => {
+  res.sendFile(join(publicDir, 'profile-widget.js'));
+});
+
+web.get('/widget.js', (_req, res) => {
   res.sendFile(join(publicDir, 'profile-widget.js'));
 });
 
@@ -972,7 +1072,7 @@ web.use('/me', (req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, PATCH, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, PATCH, PUT, OPTIONS');
   }
   if (req.method === 'OPTIONS') {
     res.sendStatus(204);
@@ -981,7 +1081,9 @@ web.use('/me', (req, res, next) => {
   next();
 });
 
-web.patch('/me', jsonParser, async (req, res) => {
+web.all('/me', (req, res, next) => {
+  if (!['PATCH', 'PUT'].includes(req.method)) return next();
+  return jsonParser(req, res, async () => {
   const token = await resolveAccessToken(req);
   if (!token?.accountId) {
     return res.status(401).json({ error: 'invalid_token' });
@@ -994,10 +1096,16 @@ web.patch('/me', jsonParser, async (req, res) => {
       preferred_username: updated.username || '',
       email: updated.email || '',
       picture: updated.picture || '',
+      given_name: updated.first_name || '',
+      family_name: updated.last_name || '',
+      name: [updated.first_name, updated.last_name].filter(Boolean).join(' ') || updated.username || '',
+      note: updated.note || '',
+      roles: updated.role ? [updated.role] : [],
     });
   } catch (error) {
     return res.status(400).json({ error: error?.message || 'Invalid profile update' });
   }
+  });
 });
 
 web.use('/app/assets', (req, res, next) => {
@@ -1012,12 +1120,137 @@ web.use('/app/assets', (req, res, next) => {
 
 web.use('/app/assets', express.static(join(publicDir, 'assets')));
 
-web.get(['/', '/app', '/app/callback'], (_req, res) => {
-  res.type('html').send(renderTemplate(indexTemplate));
+web.get(['/setup/admin', '/setup/admin/'], (_req, res) => {
+  res.type('html').send(renderTemplate(adminTemplate));
 });
 
-web.get(['/authWidget', '/authWidget/callback'], (_req, res) => {
-  res.type('html').send(renderTemplate(authWidgetTemplate));
+function redirectLegacyAdmin(page) {
+  return (req, res) => {
+    const query = new URLSearchParams({ page });
+    const token = String(req.query.token || '');
+    if (token) query.set('token', token);
+    res.redirect(302, resolvePath(basePath, `/setup/admin?${query}`));
+  };
+}
+
+web.get(['/setup/users', '/setup/users/new', '/setup/users/:id'], redirectLegacyAdmin('users'));
+web.get('/setup/config', redirectLegacyAdmin('clients'));
+web.get('/setup/oidc-sessions', redirectLegacyAdmin('sessions'));
+
+function publicAdminUser(user) {
+  if (!user) return null;
+  const { password_hash: _passwordHash, totp_secret: _totpSecret, passkeys: rawPasskeys, ...safe } = user;
+  return { ...safe, passkeyCount: Array.isArray(rawPasskeys) ? rawPasskeys.length : 0, hasPassword: Boolean(user.password_hash) };
+}
+
+function publicAdminClient(client, { includeSecret = false } = {}) {
+  if (!client) return null;
+  const { client_secret: clientSecret, api_key: apiKey, ...safe } = client;
+  return {
+    ...safe,
+    hasSecret: Boolean(clientSecret || apiKey),
+    ...(includeSecret && (clientSecret || apiKey) ? { client_secret: clientSecret || apiKey } : {}),
+  };
+}
+
+web.get('/setup/api/users', (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ users: listUsers().map(publicAdminUser) });
+});
+
+web.get('/setup/api/users/:id', (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  const user = publicAdminUser(findUserById(req.params.id));
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({ user });
+});
+
+web.post('/setup/api/users', jsonParser, async (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  try { return res.status(201).json({ user: publicAdminUser(await createUser(req.body || {})) }); }
+  catch (error) { return res.status(400).json({ error: error.message || 'Unable to create user' }); }
+});
+
+web.patch('/setup/api/users/:id', jsonParser, async (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  try { return res.json({ user: publicAdminUser(await updateUser(req.params.id, req.body || {})) }); }
+  catch (error) { return res.status(400).json({ error: error.message || 'Unable to update user' }); }
+});
+
+web.delete('/setup/api/users/:id', (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  try { deleteUser(req.params.id); return res.json({ ok: true }); }
+  catch (error) { return res.status(400).json({ error: error.message || 'Unable to delete user' }); }
+});
+
+web.get('/setup/api/clients', (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ clients: getClients().map((client) => publicAdminClient(client)) });
+});
+
+web.post('/setup/api/clients', jsonParser, (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  try { return res.status(201).json({ client: publicAdminClient(createClient(req.body || {}), { includeSecret: true }) }); }
+  catch (error) { return res.status(400).json({ error: error.message || 'Unable to create client' }); }
+});
+
+web.patch('/setup/api/clients/:id', jsonParser, (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  try { return res.json({ client: publicAdminClient(updateClient(req.params.id, req.body || {}), { includeSecret: Boolean(req.body?.client_secret || req.body?.api_key) }) }); }
+  catch (error) { return res.status(400).json({ error: error.message || 'Unable to update client' }); }
+});
+
+web.delete('/setup/api/clients/:id', (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  try { deleteClient(req.params.id); return res.json({ ok: true }); }
+  catch (error) { return res.status(400).json({ error: error.message || 'Unable to delete client' }); }
+});
+
+web.get('/setup/api/sessions', (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ store: listOidcStoreOverview() });
+});
+
+web.delete('/setup/api/sessions/:uid', (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  res.json({ ok: true, deleted: revokeOidcBySessionUid(req.params.uid) });
+});
+
+web.delete('/setup/api/grants/:id', (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  res.json({ ok: true, deleted: revokeOidcByGrantId(req.params.id) });
+});
+
+web.delete('/setup/api/client-credentials/:id', (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  const removed = revokeClientCredentialsToken(req.params.id);
+  return removed ? res.json({ ok: true }) : res.status(404).json({ error: 'Token not found' });
+});
+
+web.get('/setup/api/runtime-config', (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ config: { ...runtimeConfig, googleConfigured } });
+});
+
+web.patch('/setup/api/runtime-config', jsonParser, (req, res) => {
+  if (!requireSetupToken(req, res)) return;
+  for (const key of ['twoFactorEnabled', 'consentEnabled', 'googleOAuthEnabled', 'passkeyEnabled', 'confirmLogout']) {
+    if (Object.hasOwn(req.body || {}, key)) runtimeConfig[key] = parseBooleanFlag(req.body[key], runtimeConfig[key]);
+  }
+  res.json({ config: { ...runtimeConfig, googleConfigured } });
+});
+
+web.get(['/auth-ui', '/auth-ui/'], (_req, res) => {
+  res.type('html').send(renderTemplate(authUiTemplate));
+});
+
+web.get(['/', '/app', '/app/callback'], (_req, res) => {
+  res.type('html').send(renderTemplate(indexTemplate));
 });
 
 web.get('/flow-diagram', (_req, res) => {
@@ -1733,6 +1966,130 @@ web.get('/interaction/:uid/continue', async (req, res, next) => {
   }
 });
 
+async function createConsentResult(interactionDetails) {
+  const { prompt: { details } } = interactionDetails;
+  const grant = interactionDetails.grantId
+    ? await provider.Grant.find(interactionDetails.grantId)
+    : new provider.Grant({ accountId: interactionDetails.session.accountId, clientId: interactionDetails.params.client_id });
+  if (details.missingOIDCScope) grant.addOIDCScope(details.missingOIDCScope.join(' '));
+  if (details.missingOIDCClaims) grant.addOIDCClaims(details.missingOIDCClaims);
+  if (details.missingResourceScopes) {
+    for (const [indicator, scopes] of Object.entries(details.missingResourceScopes)) {
+      grant.addResourceScope(indicator, scopes.join(' '));
+    }
+  }
+  return { consent: { grantId: await grant.save() } };
+}
+
+web.get('/interaction/:uid/api', async (req, res) => {
+  try {
+    const details = await provider.interactionDetails(req, res);
+    const { uid, prompt, params } = details;
+    if (prompt.name === 'consent' && !isConsentEnabled()) {
+      return finishApiInteraction(req, res, await createConsentResult(details), true);
+    }
+    if (!['login', 'consent'].includes(prompt.name)) {
+      return res.status(400).json({ error: 'unsupported_interaction', message: `Unsupported interaction: ${prompt.name}` });
+    }
+    const client = params.client_id ? await provider.Client.find(params.client_id) : null;
+    return res.json({
+      uid,
+      prompt: prompt.name,
+      client: { id: params.client_id || '', name: client?.clientName || params.client_id || '' },
+      scope: String(params.scope || '').split(/\s+/).filter(Boolean),
+      backUrl: getInteractionBackUrl(params),
+      loginMethod: String(params.login_method || ''),
+      googleStartUrl: isGoogleOAuthEnabled() ? resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/api/google/start`) : '',
+      features: { twoFactor: isTwoFactorEnabled(), google: isGoogleOAuthEnabled(), passkey: isPasskeyEnabled() },
+    });
+  } catch {
+    return res.status(401).json({ error: 'interaction_expired', message: 'Interaction session expired' });
+  }
+});
+
+web.post('/interaction/:uid/api/login', jsonParser, loginLimiter, async (req, res, next) => {
+  try {
+    const { uid } = req.params;
+    await provider.interactionDetails(req, res);
+    const { username = '', password = '', otp = '', challenge = '' } = req.body || {};
+    if (challenge) {
+      const pending = consumeTotpChallenge(String(challenge), uid);
+      if (!pending) return res.status(401).json({ error: 'challenge_expired', message: 'Verification session expired' });
+      const user = findUserById(pending.accountId);
+      if (!user) return res.status(401).json({ error: 'invalid_account', message: 'Unknown account' });
+      if (!verifyTotpToken(user, otp)) {
+        return res.status(401).json({ error: 'invalid_otp', message: 'Invalid verification code', status: 'totp_required', challenge: createTotpChallenge(uid, user.id, pending.intent || 'login') });
+      }
+      return finishApiLogin(req, res, user.id);
+    }
+    const user = findUserByUsername(String(username).trim());
+    if (!user?.password_hash) return res.status(401).json({ error: 'invalid_credentials', message: 'Invalid credentials' });
+    if (!await argon2.verify(user.password_hash, String(password), { type: argon2.argon2id })) {
+      return res.status(401).json({ error: 'invalid_credentials', message: 'Invalid credentials' });
+    }
+    if (isTotpRequired(user) && (!otp || !verifyTotpToken(user, otp))) {
+      return res.json({ status: 'totp_required', challenge: createTotpChallenge(uid, user.id, 'login') });
+    }
+    return finishApiLogin(req, res, user.id);
+  } catch (error) {
+    if (isMissingInteractionSession(error)) return res.status(401).json({ error: 'interaction_expired', message: 'Interaction session expired' });
+    next(error);
+  }
+});
+
+web.post('/interaction/:uid/api/register', jsonParser, loginLimiter, async (req, res, next) => {
+  try {
+    await provider.interactionDetails(req, res);
+    const username = String(req.body?.username || '').trim();
+    const password = String(req.body?.password || '');
+    const email = String(req.body?.email || '').trim();
+    if (!username || !password) return res.status(400).json({ error: 'invalid_registration', message: 'Username and password are required' });
+    const user = await createUser({ username, password, email, auth_provider: 'local' });
+    return finishApiLogin(req, res, user.id);
+  } catch (error) {
+    if (isMissingInteractionSession(error)) return res.status(401).json({ error: 'interaction_expired', message: 'Interaction session expired' });
+    if (error?.message) return res.status(400).json({ error: 'registration_failed', message: error.message });
+    next(error);
+  }
+});
+
+web.post('/interaction/:uid/api/consent', jsonParser, async (req, res, next) => {
+  try {
+    const details = await provider.interactionDetails(req, res);
+    if (req.body?.decision === 'deny') {
+      return finishApiInteraction(req, res, { error: 'access_denied', error_description: 'End-user denied consent' }, false);
+    }
+    return finishApiInteraction(req, res, await createConsentResult(details), true);
+  } catch (error) {
+    if (isMissingInteractionSession(error)) return res.status(401).json({ error: 'interaction_expired', message: 'Interaction session expired' });
+    next(error);
+  }
+});
+
+web.get('/interaction/:uid/api/google/start', startGoogleAuth);
+
+web.post('/interaction/:uid/api/google/complete', jsonParser, async (req, res, next) => {
+  try {
+    const { uid } = req.params;
+    await provider.interactionDetails(req, res);
+    const pending = consumeGoogleCallbackSession(String(req.body?.token || ''), uid);
+    if (!pending) return res.status(401).json({ error: 'google_session_expired', message: 'Google session expired' });
+    const user = findUserById(pending.accountId);
+    if (!user) return res.status(401).json({ error: 'invalid_account', message: 'Unknown account' });
+    if (isTotpRequired(user)) return res.json({ status: 'totp_required', challenge: createTotpChallenge(uid, user.id, pending.mode || 'login') });
+    return finishApiLogin(req, res, user.id);
+  } catch (error) {
+    if (isMissingInteractionSession(error)) return res.status(401).json({ error: 'interaction_expired', message: 'Interaction session expired' });
+    next(error);
+  }
+});
+
+// The interaction URL must be the parent of every interaction API endpoint:
+// oidc-provider scopes its temporary interaction cookie to this exact path.
+web.get('/interaction/:uid', (_req, res) => {
+  res.type('html').send(renderTemplate(authUiTemplate));
+});
+
 web.get('/interaction/:uid/login/google/callback', async (req, res, next) => {
   try {
     const { uid } = req.params;
@@ -1803,6 +2160,10 @@ web.get('/interaction/:uid', async (req, res, next) => {
     const { uid, prompt, params } = details;
 
     if (prompt.name === 'login') {
+      if (params.login_method === 'google' && isGoogleOAuthEnabled()) {
+        res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/login/google`));
+        return;
+      }
       const backUrl = getInteractionBackUrl(params);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(renderLoginPage({
@@ -2281,10 +2642,25 @@ web.post('/interaction/:uid/passkey/verify', jsonParser, async (req, res) => {
 
     return res.json({
       ok: true,
+      completionToken,
       redirectTo: resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/passkey/continue?token=${encodeURIComponent(completionToken)}`),
     });
   } catch (error) {
     return res.status(400).json({ error: error?.message || 'Passkey verification failed' });
+  }
+});
+
+web.post('/interaction/:uid/api/passkey/complete', jsonParser, async (req, res, next) => {
+  try {
+    const { uid } = req.params;
+    await provider.interactionDetails(req, res);
+    const pending = consumePasskeyCompletionSession(String(req.body?.token || ''), uid);
+    if (!pending) return res.status(401).json({ error: 'passkey_session_expired', message: 'Passkey session expired' });
+    if (pending.mode === 'totp') return res.json({ status: 'totp_required', challenge: pending.challenge });
+    return finishApiLogin(req, res, pending.accountId);
+  } catch (error) {
+    if (isMissingInteractionSession(error)) return res.status(401).json({ error: 'interaction_expired', message: 'Interaction session expired' });
+    next(error);
   }
 });
 
@@ -2471,28 +2847,12 @@ async function handleOidcGoogleCallback(req, res, next) {
     }
 
     if (error) {
-      res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLoginPage({
-        basePath,
-        uid,
-        twoFactorEnabled: isTwoFactorEnabled(),
-        error: 'Google login was cancelled',
-        googleLoginUrl: getGoogleLoginUrl(uid),
-        googleRegisterUrl: getGoogleRegisterUrl(uid),
-      }));
+      res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}?error=${encodeURIComponent('Google login was cancelled')}`));
       return;
     }
 
     if (!code) {
-      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLoginPage({
-        basePath,
-        uid,
-        twoFactorEnabled: isTwoFactorEnabled(),
-        error: 'Missing Google authorization code',
-        googleLoginUrl: getGoogleLoginUrl(uid),
-        googleRegisterUrl: getGoogleRegisterUrl(uid),
-      }));
+      res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}?error=${encodeURIComponent('Missing Google authorization code')}`));
       return;
     }
 
@@ -2500,7 +2860,7 @@ async function handleOidcGoogleCallback(req, res, next) {
     const profile = await fetchGoogleProfile(tokenSet.access_token);
     const user = upsertGoogleUser(profile);
     const callbackToken = createGoogleCallbackSession(uid, user.id, pending.mode || 'login');
-    res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}/login/google/callback?token=${encodeURIComponent(callbackToken)}`));
+    res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}?google_token=${encodeURIComponent(callbackToken)}`));
   } catch (err) {
     console.error('Google callback failed', {
       uid,
@@ -2514,15 +2874,7 @@ async function handleOidcGoogleCallback(req, res, next) {
         return;
       }
 
-      res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end(renderLoginPage({
-        basePath,
-        uid,
-        twoFactorEnabled: isTwoFactorEnabled(),
-        error: 'Google login failed',
-        googleLoginUrl: getGoogleLoginUrl(uid),
-        googleRegisterUrl: getGoogleRegisterUrl(uid),
-      }));
+      res.redirect(resolvePath(basePath, `/interaction/${encodeURIComponent(uid)}?error=${encodeURIComponent('Google login failed')}`));
       return;
     }
 
@@ -2532,6 +2884,9 @@ async function handleOidcGoogleCallback(req, res, next) {
 
 // Keep the former provider-local callback working, while using the shared
 // public callback already registered for localhost and the deployed domain.
+// Transitional alias for deployments whose Google OAuth client still has the
+// callback used by the removed VFS bridge. New flows use the canonical route.
+app.get('/auth/api/callback', handleOidcGoogleCallback);
 web.get(googleCallbackRoutePath, handleOidcGoogleCallback);
 app.get('/api/callback', handleOidcGoogleCallback);
 

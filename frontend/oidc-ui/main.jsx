@@ -394,7 +394,6 @@ function LogoutSuccessView({ payload }) {
       <p className="hint">Your session {clientName ? <>for <strong>{clientName}</strong> </> : null}has been closed successfully.</p>
       <div className="actions">
         <form method="get" action={resolvePath(basePath, '/app')}><button type="submit">Open OAuth Console</button></form>
-        <form method="get" action={resolvePath(basePath, '/authWidget')}><button className="secondary" type="submit">Open AuthWidget</button></form>
       </div>
     </div>
   );

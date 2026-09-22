@@ -321,10 +321,6 @@ export default function App() {
     window.location.assign(logoutUrl);
   }
 
-  function openAuthWidget() {
-    window.location.assign(issuerEndpoint(config.issuer || getDefaults().issuer, 'authWidget'));
-  }
-
   function openUsersAdmin() {
     if (!config.setupToken) {
       setStatus({ type: 'error', message: 'Setup token obbligatorio per aprire la gestione utenti.' });
@@ -395,7 +391,6 @@ export default function App() {
             <button className="secondary" onClick={registerPasskey} disabled={busyAction === 'passkey'}>Registra/Resetta Passkey</button>
             <button className="secondary" onClick={openUsersAdmin}>Admin</button>
             <button className="secondary" onClick={openFlowDiagram}>Mappa flussi OAuth</button>
-            <button className="ghost" onClick={openAuthWidget}>Apri AuthWidget</button>
             <button className="ghost" onClick={clearState}>Pulisci sessione</button>
           </div>
           <div className={`status ${status.type === 'error' ? 'error' : ''}`.trim()}>{status.message}</div>

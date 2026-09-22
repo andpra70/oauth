@@ -6,27 +6,28 @@ services:
       dockerfile: Dockerfile
     image: ${OAUTH_SERVER_IMAGE:-docker.io/andpra70/oauth-server:latest}
     restart: ${OAUTH_SERVER_RESTART:-unless-stopped}
-    depends_on:
-      mongo:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     ports:
       - "${OAUTH_SERVER_PORT:-9000}:${PORT:-9000}"
     command: ["npm", "start"]
     environment:
-      MONGO_URI: ${MONGO_URI:-mongodb://root:rootpass@mongo:27017/oauth2?authSource=admin}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      VFS_JWT_ISSUER: ${VFS_JWT_ISSUER:-vfs-auth}
-      VFS_JWT_AUDIENCE: ${VFS_JWT_AUDIENCE:-vfs-clients}
-      VFS_PRIVATE_KEY_PATH: /run/secrets/private.pem
+      MAIL_ENABLED: ${MAIL_ENABLED:-true}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-no-reply@localhost}
+      PASSWORD_RESET_PUBLIC_URL: ${PASSWORD_RESET_PUBLIC_URL:-http://localhost:9000/reset-password}
+      PASSWORD_RESET_TOKEN_TTL_SECONDS: ${PASSWORD_RESET_TOKEN_TTL_SECONDS:-900}
+    depends_on:
+      - mailpit
     healthcheck:
       test:
         [
           "CMD",
           "node",
           "-e",
-          "Promise.all([fetch('http://127.0.0.1:' + (process.env.PORT || 9000) + (process.env.BASE_PATH || '') + '/health'),fetch('http://127.0.0.1:' + (process.env.PORT || 9000) + '/healthz')]).then(r=>process.exit(r.every(x=>x.ok)?0:1)).catch(()=>process.exit(1))"
+          "fetch('http://127.0.0.1:' + (process.env.PORT || 9000) + (process.env.BASE_PATH || '') + '/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
         ]
       interval: 30s
       timeout: 5s
@@ -34,35 +35,13 @@ services:
       start_period: 15s
     volumes:
       - ${OAUTH_SERVER_DATA_VOLUME:-oauth-server-data}:/app/data/oauth
-      - ./keys/private.pem:/run/secrets/private.pem:ro
 
-  mongo:
-    image: mongo:7
-    restart: unless-stopped
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-root}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-rootpass}
-    volumes:
-      - oauth-server-mongo:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - oauth-server-redis:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
+  mailpit:
+    image: axllent/mailpit:v1.27
+    restart: ${OAUTH_SERVER_RESTART:-unless-stopped}
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "${MAILPIT_UI_PORT:-8025}:8025"
 
 volumes:
   oauth-server-data:
-  oauth-server-mongo:
-  oauth-server-redis:

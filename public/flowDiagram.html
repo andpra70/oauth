@@ -121,16 +121,16 @@ sequenceDiagram
   alt redirect_uri non registrata o incoerente
     OP-->>APP: errore invalid_redirect_uri
   else richiesta valida
-    OP-->>APP: Pagina login /interaction/:uid
+    OP-->>APP: Auth UI React /interaction/:uid
     U->>APP: Inserisce username/password
-    APP->>FC: POST /oauth-server/interaction/:uid/login
+    APP->>FC: POST /oauth-server/interaction/:uid/api/login (JSON)
     FC->>OP: Forward submit
     OP->>DB: Verifica credenziali
     alt credenziali errate
-      OP-->>APP: Login page con errore
+      OP-->>APP: Errore JSON mostrato dalla Auth UI
     else credenziali valide
       alt CONSENT_ENABLED=true e scope nuovi
-        OP-->>APP: Pagina consenso /interaction/:uid
+        OP-->>APP: Contesto consenso JSON mostrato dalla Auth UI
         U->>APP: Click Allow o Deny
         alt Deny
           OP-->>APP: redirect_uri?error=access_denied&state=...

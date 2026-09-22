@@ -69,7 +69,7 @@ export default function ProfileWidgetDemo() {
           Apri profilo
         </button>
       </div>
-      {ready ? <profile-widget api-base="/auth" auth-widget-url="/auth/widget.js" /> : null}
+      {ready ? <profile-widget issuer={new URL(appPath(''), window.location.origin).toString().replace(/\/$/, '')} client-id="fileserver-web" /> : null}
     </section>
   );
 }
